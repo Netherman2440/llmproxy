@@ -24,7 +24,7 @@ import time
 
 import aiohttp.web
 
-from . import errors, metrics
+from . import errors, leases, metrics
 
 # Dimensions enforced in phase 1. Phase 2 appends the two ``*_tpd`` entries.
 _DIMENSIONS = ("rpm", "concurrency")
@@ -90,6 +90,9 @@ def _reject(f_req, dimension, limit, b_name, oldest=None):
 
     if dimension == "rpm":
         msg = "Rate limit exceeded: %d rpm (model '%s')." % (limit, b_name)
+        # Shared windows use server expiry, not this process's monotonic
+        # timestamps: a conservative full window is safe without clock skew.
+        oldest = time.monotonic() if oldest is None else oldest
         retry_after = max(1, math.ceil(
             RPM_WINDOW - (time.monotonic() - oldest)))
     else:
@@ -120,25 +123,37 @@ async def parser_slot(f_req, user):
     global_limit = cfg.get("concurrency", 4)
     user_limit = cfg.get("per_user", 2)
     timeout = cfg.get("timeout", 30.0)
-    if state.active >= global_limit:
-        raise _reject(f_req, "parsing", global_limit, "__parsing__")
-    if state.users.get(uid, 0) >= user_limit:
-        raise _reject(f_req, "parsing", user_limit, "__parsing__")
-    state.active += 1
-    state.users[uid] = state.users.get(uid, 0) + 1
+    local_owned = False
+    shared_context = contextlib.nullcontext()
+    if leases.shared(f_req):
+        shared_context = leases.hold(f_req, [
+            (leases.bucket(f_req, "parser-global"), global_limit),
+            (leases.bucket(f_req, "parser-user", uid), user_limit)])
+    else:
+        if state.active >= global_limit:
+            raise _reject(f_req, "parsing", global_limit, "__parsing__")
+        if state.users.get(uid, 0) >= user_limit:
+            raise _reject(f_req, "parsing", user_limit, "__parsing__")
+        state.active += 1
+        state.users[uid] = state.users.get(uid, 0) + 1
+        local_owned = True
     try:
         try:
-            async with asyncio.timeout(timeout):
-                yield
+            async with shared_context:
+                async with asyncio.timeout(timeout):
+                    yield
+        except leases.LeaseCapacityError as error:
+            raise _reject(f_req, "parsing", error.limit, "__parsing__") from None
         except TimeoutError:
             raise errors.json_error(f_req, aiohttp.web.HTTPRequestTimeout,
                 "Request body parsing timed out.", openai_type="timeout_error",
                 anthropic_type="api_error", code="request_timeout") from None
     finally:
-        state.active -= 1
-        state.users[uid] -= 1
-        if state.users[uid] == 0:
-            del state.users[uid]
+        if local_owned:
+            state.active -= 1
+            state.users[uid] -= 1
+            if state.users[uid] == 0:
+                del state.users[uid]
 
 
 @contextlib.asynccontextmanager
@@ -152,6 +167,24 @@ async def slot(f_req, user, b_name, b_cfg):
     client disconnect (the streaming drain keeps the handler alive).
     """
     resolved = resolve(user, b_name, f_req.app["config"])
+
+    if leases.shared(f_req):
+        if "rpm" in resolved:
+            limit, key = resolved["rpm"]
+            admitted = await leases.take_window(f_req,
+                leases.bucket(f_req, "rpm", *key), limit, RPM_WINDOW)
+            if not admitted:
+                raise _reject(f_req, "rpm", limit, b_name)
+        dimensions = []
+        if "concurrency" in resolved:
+            limit, key = resolved["concurrency"]
+            dimensions.append((leases.bucket(f_req, "model-concurrency", *key), limit))
+        try:
+            async with leases.hold(f_req, dimensions):
+                yield
+        except leases.LeaseCapacityError as error:
+            raise _reject(f_req, "concurrency", error.limit, b_name) from None
+        return
 
     # 1. rpm — sliding window of admitted timestamps.
     if "rpm" in resolved:

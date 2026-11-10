@@ -33,7 +33,7 @@ class TestConfigHardening(unittest.TestCase):
         for value in (None, False, [], "invalid", 3):
             with self.subTest(root_type=type(value).__name__):
                 self.reject(value)
-            for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance", "parsing"):
+            for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance", "parsing", "admission"):
                 with self.subTest(table=key, value_type=type(value).__name__):
                     self.reject({key: value})
 
@@ -68,6 +68,20 @@ class TestConfigHardening(unittest.TestCase):
         for value in (None, True, 0, -1, float("inf"), float("nan"), "30"):
             with self.subTest(timeout=value):
                 self.reject({"parsing": {"timeout": value}})
+
+    def test_shared_admission_profile_cannot_disable_or_misspell_its_safety_bounds(self):
+        cases = ({"mode": "other"}, {"mode": True}, {"mode": "shared"},
+            {"scope": ""}, {"scope": 123}, {"scope": "x" * 65},
+            {"lease_ttl": 0}, {"lease_ttl": True}, {"lease_ttl": float("inf")},
+            {"lease_ttl": 3601}, {"io_timeout": None}, {"io_timeout": 0},
+            {"io_timeout": float("nan")}, {"lease_ttl": 1, "io_timeout": 0.5})
+        for options in cases:
+            with self.subTest(options=options):
+                self.reject({"admission": options})
+
+    def test_valid_shared_admission_profile_is_accepted(self):
+        config.validate({"admission": {"mode": "shared", "scope": "audit-test",
+            "lease_ttl": 0.4, "io_timeout": 0.03}})
 
     def test_backend_urls_have_supported_scheme_host_and_no_credentials(self):
         for value in (None, 12, "", " ", "inference:8000", "ftp://host", "file:///etc/passwd",

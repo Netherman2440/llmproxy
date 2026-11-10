@@ -62,10 +62,27 @@ def _backend_url(value, label):
         raise ConfigError("%s requires an HTTP(S) host without credentials, query or fragment" % label)
 
 
+def _admission_fields(cfg):
+    options = cfg.get("admission", {})
+    mode = options.get("mode", "local")
+    if mode not in ("local", "shared"):
+        raise ConfigError("admission.mode must be local or shared")
+    if "scope" in options or mode == "shared":
+        _text(options.get("scope"), "admission.scope")
+        if len(options["scope"]) > 64:
+            raise ConfigError("admission.scope is too long")
+    ttl, io_timeout = options.get("lease_ttl", 60), options.get("io_timeout", 5)
+    _positive_finite(ttl, "admission.lease_ttl")
+    _positive_finite(io_timeout, "admission.io_timeout")
+    if ttl > 3600 or io_timeout > ttl / 6:
+        raise ConfigError("admission requires lease_ttl <=3600 and io_timeout <=lease_ttl/6")
+
+
 def _global_fields(cfg):
-    for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance", "parsing"):
+    for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance", "parsing", "admission"):
         if key in cfg:
             _table(cfg[key], key)
+    _admission_fields(cfg)
     parsing = cfg.get("parsing", {})
     for key in ("concurrency", "per_user"):
         if key in parsing and (type(parsing[key]) is not int or parsing[key] <= 0):

@@ -66,6 +66,16 @@ http_origin = "*"
 #per_user = 2
 #timeout = 30
 
+# Shared admission is explicit; local is the default single-process profile.
+# All replicas must share scope, database and policy. Mode/scope/lease settings
+# require restart (SIGHUP never rebinds active owners to a different scope).
+# Shared DB failure/lost ownership fails closed; no local fallback.
+#[admission]
+#mode = "shared"
+#scope = "my-proxy-service"
+#lease_ttl = 60
+#io_timeout = 5  # must be <=lease_ttl/6
+
 # Polling background file conversions (GET /v1/files/convert/{id}). Polls do
 # not count against rpm/concurrency, and for a background submission
 # (background=true) concurrency only bounds the upload: the job stays queued
