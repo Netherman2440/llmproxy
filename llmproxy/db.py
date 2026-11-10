@@ -5,6 +5,7 @@ import logging
 import sqlite3
 import uuid
 
+from .accounting_sqlite import SqliteAccounting
 from .admission import MongoAdmission, SqliteAdmission
 from .expiry import valid_expiry
 from .migrations import upgrade_sqlite
@@ -215,7 +216,7 @@ class MongoDatabase(MongoAdmission):
             raise DatabaseError(e) from e
 
 
-class SqliteDatabase(SqliteAdmission):
+class SqliteDatabase(SqliteAdmission, SqliteAccounting):
     @classmethod
     async def create(cls, uri):
         import aiosqlite
@@ -228,6 +229,8 @@ class SqliteDatabase(SqliteAdmission):
         logger.debug("Connected to database")
 
         try:
+            await self.db.execute('PRAGMA synchronous=FULL')
+            await self.db.execute('PRAGMA foreign_keys=ON')
             await upgrade_sqlite(self.db)
         except Exception as error:
             await self.db.close()

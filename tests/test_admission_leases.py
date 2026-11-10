@@ -1,5 +1,7 @@
 import asyncio
 import multiprocessing
+import importlib.resources
+import sqlite3
 import os
 import tempfile
 import unittest
@@ -85,19 +87,23 @@ class TestSqliteAdmissionLeases(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(process.exitcode, 0)
 
     async def test_v1_upgrade_adds_leases_without_dropping_user_data(self):
-        await self.db.db.executescript("""
-            DROP TABLE IF EXISTS admission_lease;
-            INSERT INTO api_key(id,secret,type) VALUES('legacy','synthetic','LLM');
-            PRAGMA user_version=1;
-        """)
-        migrated = await SqliteDatabase.create("sqlite://" + self.path)
-        try:
-            version = await (await migrated.db.execute("PRAGMA user_version")).fetchone()
-            self.assertEqual(version["user_version"], 2)
-            self.assertEqual(len(await migrated.user_list("synthetic")), 1)
-            self.assertEqual(await (await migrated.db.execute("SELECT * FROM admission_lease")).fetchall(), [])
-        finally:
-            await migrated.close()
+        # A genuine legacy schema, not a newer database with a downgraded marker.
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'legacy.sqlite')
+            legacy = sqlite3.connect(path)
+            legacy.executescript(importlib.resources.files('llmproxy').joinpath('schema.sql').read_text())
+            legacy.execute("INSERT INTO api_key(id,secret,type) VALUES('legacy','synthetic','LLM')")
+            legacy.execute('PRAGMA user_version=1')
+            legacy.commit()
+            legacy.close()
+            migrated = await SqliteDatabase.create('sqlite://' + path)
+            try:
+                version = await (await migrated.db.execute('PRAGMA user_version')).fetchone()
+                self.assertEqual(version['user_version'], 3)
+                self.assertEqual(len(await migrated.user_list('synthetic')), 1)
+                self.assertEqual(await (await migrated.db.execute('SELECT * FROM admission_lease')).fetchall(), [])
+            finally:
+                await migrated.close()
 
     async def test_unknown_future_schema_fails_closed_without_downgrade(self):
         await self.db.db.execute("PRAGMA user_version=99")
