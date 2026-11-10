@@ -1,5 +1,6 @@
 """Adapter-owned expiring leases, independent from process-local counters."""
 
+import datetime
 import math
 
 
@@ -17,6 +18,73 @@ def validate_lease(bucket, owner, ttl=None, limit=None):
             raise ValueError("Lease lifetime must be finite, positive and at most3600s")
     if limit is not None and (type(limit) is not int or limit <= 0):
         raise ValueError("Lease capacity must be a positive integer")
+
+
+def _active_holders():
+    return {"$filter": {"input": "$holders", "as": "holder",
+        "cond": {"$gt": ["$$holder.expires_at", "$$NOW"]}}}
+
+
+def _has_owner(owner):
+    return {"$in": [{"$literal": owner}, {"$map": {"input": _active_holders(),
+        "as": "holder", "in": "$$holder.owner"}}]}
+
+
+def _holder_expiry_stage():
+    return {"$set": {"expires_at": {"$ifNull": [{"$max": "$holders.expires_at"}, "$$NOW"]}}}
+
+
+class MongoAdmission:
+    async def _admission_collection(self):
+        collection = self.db["cgc"]["admission_bucket"]
+        if not getattr(self, "_admission_index_ready", False):
+            await collection.create_index("expires_at", expireAfterSeconds=0,
+                name="admission_bucket_expiry")
+            self._admission_index_ready = True
+        return collection
+
+    async def admission_acquire(self, bucket, owner, limit, ttl):
+        from pymongo.errors import DuplicateKeyError
+        validate_lease(bucket, owner, ttl, limit)
+        if ttl is None or limit is None:
+            raise ValueError("Lease lifetime and capacity are required")
+        collection = await self._admission_collection()
+        try:
+            await collection.update_one({"_id": bucket}, {"$setOnInsert": {
+                "holders": [], "expires_at": datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC)}}, upsert=True)
+        except DuplicateKeyError:
+            # A competing process initialized the same bucket first.
+            pass
+        remaining = {"$filter": {"input": _active_holders(), "as": "holder",
+            "cond": {"$ne": ["$$holder.owner", {"$literal": owner}]}}}
+        holder = {"owner": {"$literal": owner}, "expires_at": {"$add": ["$$NOW", math.ceil(ttl * 1000)]}}
+        result = await collection.find_one_and_update({"_id": bucket, "$expr": {"$or": [
+            _has_owner(owner), {"$lt": [{"$size": _active_holders()}, limit]}]}},
+            [{"$set": {"holders": {"$concatArrays": [remaining, [holder]]}}}, _holder_expiry_stage()],
+            projection={"_id": 1})
+        return result is not None
+
+    async def admission_renew(self, bucket, owner, ttl):
+        validate_lease(bucket, owner, ttl)
+        if ttl is None:
+            raise ValueError("Lease lifetime is required")
+        collection = await self._admission_collection()
+        holders = {"$map": {"input": _active_holders(), "as": "holder", "in": {"$cond": [
+            {"$eq": ["$$holder.owner", {"$literal": owner}]},
+            {"owner": {"$literal": owner}, "expires_at": {"$add": ["$$NOW", math.ceil(ttl * 1000)]}},
+            "$$holder"]}}}
+        result = await collection.find_one_and_update({"_id": bucket, "$expr": _has_owner(owner)},
+            [{"$set": {"holders": holders}}, _holder_expiry_stage()], projection={"_id": 1})
+        return result is not None
+
+    async def admission_release(self, bucket, owner):
+        validate_lease(bucket, owner)
+        collection = await self._admission_collection()
+        holders = {"$filter": {"input": _active_holders(), "as": "holder",
+            "cond": {"$ne": ["$$holder.owner", {"$literal": owner}]}}}
+        result = await collection.find_one_and_update({"_id": bucket, "$expr": _has_owner(owner)},
+            [{"$set": {"holders": holders}}, _holder_expiry_stage()], projection={"_id": 1})
+        return result is not None
 
 
 class SqliteAdmission:
