@@ -1,11 +1,8 @@
 import asyncio
 import gc
 import hashlib
-import importlib
-import importlib.resources
 import json
 import os
-import sqlite3
 import sys
 import tempfile
 import time
@@ -16,7 +13,6 @@ from unittest import mock
 
 import aiohttp
 import aiohttp.test_utils
-import prometheus_client
 
 from llmproxy import auth, config, ratelimit
 from llmproxy.app import create_app, reload_config
@@ -945,9 +941,9 @@ class TestMalformedBody(LLMProxyAppTestCase):
                     self.assertEqual(msg, expected)
 
     async def test_failed_multipart_releases_spooled_files(self):
-        # The file part is spooled to a temp file before a later part fails
-        # the parse. That file must be released (and so closed) right away,
-        # not stay open with its disk space until the cyclic GC runs, so GC
+        # The file part gets a temporary spool before a later part fails
+        # the parse. Its memory/file resource must be released right away,
+        # not stay alive until the cyclic GC runs, so GC
         # is off here and only refcounting can free it. Covers a plain error,
         # one with a chained exception, an assert, and a 413 that is passed
         # on rather than turned into a 400.
@@ -966,20 +962,32 @@ class TestMalformedBody(LLMProxyAppTestCase):
             ("field over client_max_size", 413, model_part + b"\r\n"
                 + b"m" * 60000 + b"\r\n--xyz--\r\n"),
         ]
-        temporary_file = tempfile.TemporaryFile
+        # Supported aiohttp uses a small in-memory spool, then rolls to disk.
+        # Track the actual allocation boundary, not only its disk fallback.
+        temporary_file = aiohttp.web_request.SpooledTemporaryFile
         gc.disable()
         self.addCleanup(gc.enable)
 
         for name, status, rest in cases:
             with self.subTest(case=name):
                 spooled = []
+                spool_created = asyncio.Event()
+
+                async def body_chunks():
+                    # Force a resource to exist before the later failure.
+                    # Current aiohttp can reject a fully buffered oversized
+                    # body before allocating any spool at all.
+                    yield file_part
+                    await asyncio.wait_for(spool_created.wait(), 1)
+                    yield rest
 
                 def tracked_temporary_file(*args, **kwargs):
                     f = temporary_file(*args, **kwargs)
                     spooled.append(weakref.ref(f))
+                    spool_created.set()
                     return f
 
-                with mock.patch("tempfile.TemporaryFile",
+                with mock.patch("aiohttp.web_request.SpooledTemporaryFile",
                             tracked_temporary_file), \
                         mock.patch.object(self.app, "_client_max_size",
                             50000), \
@@ -987,7 +995,7 @@ class TestMalformedBody(LLMProxyAppTestCase):
                     # Closed by its finalizer, which warns about it.
                     warnings.simplefilter("ignore", ResourceWarning)
                     req = self._raw("/v1/audio/transcriptions",
-                        file_part + rest, "multipart/form-data; boundary=xyz")
+                        body_chunks(), "multipart/form-data; boundary=xyz")
                     async with req as res:
                         self.assertEqual(res.status, status)
 
@@ -1005,7 +1013,7 @@ class TestMalformedBody(LLMProxyAppTestCase):
                 "multipart/form-data; boundary=xyz")
             await self._assert_400(req, "/v1/audio/transcriptions")
 
-        [line] = [l for l in logs.output if "Malformed request body" in l]
+        [line] = [entry for entry in logs.output if "Malformed request body" in entry]
         self.assertLess(len(line), 500)
         self.assertRegex(line, r" at multipart\.py:\d+ _read_boundary$")
 
