@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import decimal
 import unittest
@@ -98,19 +99,15 @@ class TestStreamThroughPrepareDisconnect(unittest.IsolatedAsyncioTestCase):
             b"data: [DONE]\n\n"
         )
 
-        class FakeContent:
-            def __init__(self, data):
-                self._d = data
-                self._i = 0
+        from aiohttp.base_protocol import BaseProtocol
 
-            async def read(self, n):
-                chunk = self._d[self._i:self._i + n]
-                self._i += n
-                return chunk
+        source = aiohttp.StreamReader(BaseProtocol(asyncio.get_running_loop()), limit=65536)
+        source.feed_data(blocks)
+        source.feed_eof()
 
         class FakeBackendResp:
             headers = {}
-            content = FakeContent(blocks)
+            content = source
 
         class FakeApp:
             logger = _logging.getLogger("test")
@@ -120,6 +117,7 @@ class TestStreamThroughPrepareDisconnect(unittest.IsolatedAsyncioTestCase):
 
         class FakeReq:
             app = FakeApp()
+            transport = None  # The real Request loses its transport after disconnect.
 
             def __getitem__(self, key):
                 return "rid"

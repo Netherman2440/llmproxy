@@ -9,6 +9,10 @@ port = 8080
 timeout_connect = 5  # connection timeout
 timeout_read = 60  # response timeout (global default sock_read; override per-backend)
 
+# Frontend SSE prepare/write/EOF deadline, seconds (default10, restart to change).
+# A slow client is disconnected while final backend usage is still drained.
+#write_timeout = 10
+
 # Maximum accepted request body size in bytes. Default is 2 GiB so audio and
 # PDF uploads work; lower it if this proxy only serves text endpoints.
 #client_max_size = 2147483648

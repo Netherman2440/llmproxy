@@ -66,7 +66,7 @@ def _global_fields(cfg):
     for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance"):
         if key in cfg:
             _table(cfg[key], key)
-    for key in ("timeout_connect", "timeout_read"):
+    for key in ("timeout_connect", "timeout_read", "write_timeout"):
         if key in cfg:
             _positive_finite(cfg[key], key)
     for key in ("host", "http_origin"):

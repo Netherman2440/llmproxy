@@ -47,7 +47,7 @@ class TestConfigHardening(unittest.TestCase):
 
     def test_every_timeout_is_positive_finite_and_not_boolean(self):
         for value in (True, False, 0, -1, float("nan"), float("inf"), -float("inf"), "30"):
-            for key in ("timeout_connect", "timeout_read"):
+            for key in ("timeout_connect", "timeout_read", "write_timeout"):
                 with self.subTest(key=key, value=value):
                     self.reject({key: value})
             with self.subTest(backend_timeout=value):

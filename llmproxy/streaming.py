@@ -1,21 +1,32 @@
-import contextlib
+import asyncio
 import decimal
 import json
+import math
 
 import aiohttp.web
+from aiohttp.http_exceptions import LineTooLong
 
 from .budget_headers import EXPOSE_HEADERS
 
 
-async def readuntil(stream, separator: bytes = b"\n") -> bytes:
-    result = bytearray()
-    while not result.endswith(separator):
-        b = await stream.read(1)
-        if not b:
-            break
-        result += b
+SSE_FRAME_MAX_BYTES = 2 * 1024 * 1024
 
-    return result
+
+async def readuntil(stream, separator: bytes = b"\n", *,
+                    max_bytes: int = SSE_FRAME_MAX_BYTES) -> bytes:
+    """Use the pinned aiohttp chunk-aware delimiter reader with a frame budget.
+
+    aiohttp >=3.14 preserves separators split across buffers; the old one-byte
+    workaround is no longer necessary. Never expose LineTooLong's raw prefix.
+    """
+    if not isinstance(separator, bytes) or not separator:
+        raise ValueError("A nonempty byte separator is required")
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("A positive integer frame budget is required")
+    try:
+        return await stream.readuntil(separator, max_size=max_bytes)
+    except LineTooLong:
+        raise ValueError("Backend stream frame exceeds the byte limit") from None
 
 
 def parse_sse_event(raw_event):
@@ -48,7 +59,7 @@ def parse_sse_event(raw_event):
 
 
 async def drain(read_block, write_block, on_chunk, on_disconnect=None,
-        disconnected=False):
+        disconnected=False, *, write_timeout=10.0):
     """Forward SSE blocks from a backend to the client without ever losing usage.
 
     Reads blocks via ``read_block()`` until it returns ``b""`` (backend EOF),
@@ -62,13 +73,17 @@ async def drain(read_block, write_block, on_chunk, on_disconnect=None,
     start already disconnected (e.g. the client vanished during the header
     flush): we then drain the backend for usage without writing.
     """
+    if (type(write_timeout) not in (int, float) or write_timeout <= 0
+            or not math.isfinite(write_timeout)):
+        raise ValueError("A finite positive stream write deadline is required")
     while (chunk := await read_block()):
         on_chunk(chunk)
         if disconnected:
             continue
         try:
-            await write_block(chunk)
-        except OSError as e:
+            async with asyncio.timeout(write_timeout):
+                await write_block(chunk)
+        except (OSError, TimeoutError) as e:
             disconnected = True
             if on_disconnect is not None:
                 on_disconnect(e)
@@ -102,6 +117,7 @@ async def stream_through(f_req, b_res, on_chunk, extra_headers=None):
     same reason X-Request-ID and CORS are set manually below.
     """
     app = f_req.app
+    write_timeout = app["config"].get("write_timeout", 10.0)
     headers = {"Content-Type":
         b_res.headers.get("Content-Type", "application/octet-stream")}
     headers["X-Request-ID"] = str(f_req["request_id"])
@@ -116,20 +132,36 @@ async def stream_through(f_req, b_res, on_chunk, extra_headers=None):
     # of letting it abort billing (matches the pre-refactor handle_resp_stream,
     # which wrapped prepare in the same try/except as the write loop).
     disconnected = False
-    try:
-        await f_res.prepare(f_req)
-    except OSError as e:
-        app.logger.info("Client disconnected: %s", e)
+
+    def on_disconnect(error):
+        nonlocal disconnected
         disconnected = True
+        f_res.force_close()
+        if f_req.transport is not None:
+            # Do not let the framework retry an unfinished prepare/EOF against
+            # a stalled socket after the handler returns. Only the client closes;
+            # the independent upstream is still drained for final usage.
+            f_req.transport.abort()
+        app.logger.info("Client disconnected (%s)", type(error).__name__)
+
+    try:
+        async with asyncio.timeout(write_timeout):
+            await f_res.prepare(f_req)
+    except (OSError, TimeoutError) as error:
+        on_disconnect(error)
 
     async def read_block():
         return await readuntil(b_res.content, b"\n\n")
 
     await drain(read_block, f_res.write, on_chunk,
-        on_disconnect=lambda e: app.logger.info("Client disconnected: %s", e),
-        disconnected=disconnected)
+        on_disconnect=on_disconnect, disconnected=disconnected,
+        write_timeout=write_timeout)
 
-    with contextlib.suppress(OSError):
-        await f_res.write_eof()
+    if not disconnected:
+        try:
+            async with asyncio.timeout(write_timeout):
+                await f_res.write_eof()
+        except (OSError, TimeoutError) as error:
+            on_disconnect(error)
 
     return f_res
