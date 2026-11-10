@@ -1,0 +1,4 @@
+# Build tools only. Runtime dependencies have their own canonical lock.
+# Keep setuptools aligned with pyproject.toml [build-system].
+build==1.6.1
+setuptools==84.2.1

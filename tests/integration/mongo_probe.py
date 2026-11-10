@@ -18,6 +18,13 @@ from urllib.parse import quote
 STAGE = "imports"
 
 
+def validate_target(env):
+    if (env.get("MONGO_HOST") != "audit-stt-mongo"
+            or env.get("AUDIT_NAMESPACE") not in ("izajac", "ci-audit")):
+        raise ValueError("Probe is restricted to explicit audit resources")
+    return env["AUDIT_NAMESPACE"]
+
+
 async def probe():
     global STAGE
     import bson
@@ -25,9 +32,8 @@ async def probe():
     from pymongo.errors import OperationFailure
     from llmproxy.db import MongoDatabase, shutdown_all
 
+    namespace = validate_target(os.environ)
     host = os.environ["MONGO_HOST"]
-    if host != "audit-stt-mongo" or os.environ["AUDIT_NAMESPACE"] != "izajac":
-        raise ValueError("Probe is restricted to the isolated audit resource")
     username = os.environ["MONGO_ADMIN_USERNAME"]
     password = os.environ["MONGO_ADMIN_PASSWORD"]
     options = dict(username=username, password=password, authSource="admin",
@@ -126,7 +132,7 @@ async def probe():
         finally:
             bad.close()
         version = (await client.admin.command("buildInfo"))["version"]
-        print(json.dumps({"status": "PASS", "namespace": "izajac", "mongo": version,
+        print(json.dumps({"status": "PASS", "namespace": namespace, "mongo": version,
             "motor": importlib.metadata.version("motor"),
             "pymongo": importlib.metadata.version("pymongo"), "replica_set": "auditstt",
             "adapter_connection_and_cache": True, "same_day_expiry": True,

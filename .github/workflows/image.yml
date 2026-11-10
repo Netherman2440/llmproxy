@@ -1,22 +1,36 @@
-on: [push, workflow_dispatch]
+name: Verify locked runtime and image
+on:
+  pull_request:
+  push:
+    branches: [main, master, fix/post-audit]
+  workflow_dispatch:
+permissions:
+  contents: read
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v3
-      - uses: docker/metadata-action@v3
-        id: metadata
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          images: ghcr.io/${{ github.repository }}
-      - uses: docker/login-action@v1
+          python-version: "3.12"
+      - run: python -m pip install --require-hashes -r requirements-runtime.lock
+      - run: python -m unittest discover
+  image:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker build --pull --tag llmproxy:verify .
+      - run: docker run --rm llmproxy:verify --help
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: int128/kaniko-action@v1
-        with:
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          cache: true
-          cache-repository: ghcr.io/${{ github.repository }}/cache
+          version: v0.76.2
+          image-ref: llmproxy:verify
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+# No login, packages:write, image push or public cache. Private publication
+# is a separate protected/manual GitLab gate after verification and scan.
