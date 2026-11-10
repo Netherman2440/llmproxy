@@ -1051,7 +1051,8 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
     def test_validate_accepts_every_backend_type(self):
         for backend_type in config.BACKEND_TYPES:
             with self.subTest(type=backend_type):
-                meta = {"type": backend_type}
+                meta = {"type": backend_type, "url": "https://example.org",
+                    "device": "a5000", "token": "synthetic-only"}
                 if backend_type == "decision":
                     meta.update(url="https://example.org", model="basal", device="a5000")
                 if backend_type in ("conversion", "realtime"):
@@ -1081,6 +1082,7 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
 
     def test_validate_accepts_positive_integer_max_model_len(self):
         config.validate({"backends": {"mymodel": {"type": "chat",
+            "url": "http://inference:8000", "device": "cpu", "token": "",
             "max_model_len": 131072}}})
 
     def test_validate_rejects_invalid_max_model_len(self):
@@ -1109,8 +1111,10 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
     def test_validate_accepts_valid_timeout_and_client_max_size(self):
         config.validate({
             "client_max_size": 2147483648,
-            "backends": {"m": {"type": "chat", "timeout": 1800},
-                "n": {"type": "chat", "timeout": 0.5}},
+            "backends": {"m": {"type": "chat", "timeout": 1800,
+                "url": "http://inference:8000", "device": "cpu", "token": ""},
+                "n": {"type": "chat", "timeout": 0.5,
+                    "url": "http://inference:8000", "device": "cpu", "token": ""}},
         })
 
     def test_validate_rejects_invalid_provenance(self):

@@ -2,7 +2,6 @@
 concurrency, 429 body flavours). No aiohttp server — `slot` is driven directly
 via a tiny fake request."""
 
-import asyncio
 import types
 import unittest
 
@@ -136,6 +135,35 @@ class TestConcurrency(unittest.IsolatedAsyncioTestCase):
                     pass
             self.assertEqual(cm.exception.status, 429)
             self.assertNotIn("Retry-After", cm.exception.headers)
+
+    async def test_flush_preserves_slots_held_by_inflight_requests(self):
+        cfg = {"rate_limit": {"concurrency": 1}}
+        async with await self._slot(cfg):
+            ratelimit.flush()
+            with self.assertRaises(aiohttp.web.HTTPTooManyRequests):
+                async with await self._slot(cfg):
+                    pass
+        async with await self._slot(cfg):
+            pass
+
+    async def test_old_release_after_reload_does_not_free_new_request_slot(self):
+        cfg = {"rate_limit": {"concurrency": 2}}
+        old = await self._slot(cfg)
+        new = await self._slot(cfg)
+        await old.__aenter__()
+        try:
+            ratelimit.flush()
+            await new.__aenter__()
+            try:
+                await old.__aexit__(None, None, None)
+                cfg["rate_limit"]["concurrency"] = 1
+                with self.assertRaises(aiohttp.web.HTTPTooManyRequests):
+                    async with await self._slot(cfg):
+                        pass
+            finally:
+                await new.__aexit__(None, None, None)
+        finally:
+            await old.__aexit__(None, None, None)
 
     async def test_release_on_exception(self):
         cfg = {"rate_limit": {"concurrency": 1}}

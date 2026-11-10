@@ -3,6 +3,7 @@ import math
 import os
 import sys
 import tomllib
+from urllib.parse import urlsplit
 
 from . import decision_adapters
 
@@ -25,6 +26,77 @@ DECISION_LIMITS = {"max_questions": 16, "max_branches": 64,
 FILES_OPTIONS = ("max_polls_in_flight", "max_poll_response_bytes")
 
 
+def _table(value, label):
+    if type(value) is not dict:
+        raise ConfigError("%s must be a table" % label)
+
+
+def _text(value, label, *, allow_empty=False):
+    if (type(value) is not str or any(ord(char) < 32 or ord(char) == 127 for char in value)
+            or (not value.strip() and not (allow_empty and value == ""))):
+        raise ConfigError("%s must be a valid nonempty string" % label)
+
+
+def _positive_finite(value, label):
+    try:
+        valid = type(value) in (int, float) and value > 0 and math.isfinite(value)
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise ConfigError("%s must be finite and positive" % label)
+
+
+def _backend_url(value, label):
+    _text(value, label)
+    try:
+        url = urlsplit(value)
+        valid = (not any(char.isspace() for char in value)
+                 and url.scheme in ("http", "https") and bool(url.hostname)
+                 and url.username is None and url.password is None
+                 and not url.query and not url.fragment
+                 and (url.port is None or 0 < url.port <= 65535))
+    except (ValueError, UnicodeError):
+        valid = False
+    if not valid:
+        # Never echo a URL: an operator may have embedded a credential in it.
+        raise ConfigError("%s requires an HTTP(S) host without credentials, query or fragment" % label)
+
+
+def _global_fields(cfg):
+    for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance"):
+        if key in cfg:
+            _table(cfg[key], key)
+    for key in ("timeout_connect", "timeout_read"):
+        if key in cfg:
+            _positive_finite(cfg[key], key)
+    for key in ("host", "http_origin"):
+        if key in cfg:
+            _text(cfg[key], key)
+    if "port" in cfg and (type(cfg["port"]) is not int or not 1 <= cfg["port"] <= 65535):
+        raise ConfigError("port must be an integer in 1..65535")
+    if "log_level" in cfg and cfg["log_level"] not in (
+            "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "FATAL", "WARN", "NOTSET"):
+        raise ConfigError("log_level must be a known logging level")
+    if "db" in cfg:
+        uri = cfg["db"].get("uri")
+        _text(uri, "db.uri")
+        try:
+            valid = ((uri.startswith("sqlite://") and bool(uri[9:].strip()))
+                     or (uri.startswith("mongodb://") and bool(urlsplit(uri).netloc)))
+        except (ValueError, UnicodeError):
+            valid = False
+        if not valid:
+            raise ConfigError("db.uri requires sqlite://path or mongodb://host")
+    metrics = cfg.get("metrics", {})
+    if "enabled" in metrics and type(metrics["enabled"]) is not bool:
+        raise ConfigError("metrics.enabled must be a boolean")
+    if "path" in metrics:
+        path = metrics["path"]
+        _text(path, "metrics.path")
+        if not path.startswith("/") or "?" in path or "#" in path:
+            raise ConfigError("metrics.path must be an absolute route without query or fragment")
+
+
 def _validate_rate_limit(rl, prefix=""):
     """Validate a ``[rate_limit]`` / ``[backends.X.rate_limit]`` block.
 
@@ -33,6 +105,7 @@ def _validate_rate_limit(rl, prefix=""):
     int (``type(v) is not int`` excludes ``bool``). 0 = unlimited, NULL/absent
     = fall through. ``prefix`` labels backend errors.
     """
+    _table(rl, prefix + "rate_limit")
     for key in ("rpm", "concurrency"):
         if key in rl:
             value = rl[key]
@@ -43,6 +116,8 @@ def _validate_rate_limit(rl, prefix=""):
 
 
 def validate(cfg):
+    _table(cfg, "config")
+    _global_fields(cfg)
     _validate_budget_options(cfg.get("budget", {}), "budget", global_options=True)
     for key in ("client_max_size", "max_json_body"):
         if key in cfg:
@@ -83,6 +158,8 @@ def validate(cfg):
             raise ConfigError("files.%s must be a positive integer" % key)
 
     for name, meta in cfg.get("backends", {}).items():
+        _text(name, "Backend name")
+        _table(meta, 'Backend "%s"' % name)
         # Required: without it the proxy cannot tell which endpoints may reach
         # this backend (e.g. chat completions sent to an embedding model).
         if meta.get("type") not in BACKEND_TYPES:
@@ -99,9 +176,8 @@ def validate(cfg):
                     raise ConfigError('Backend "%s" %s must be a non-empty string' % (name, key))
             if "token" in meta and type(meta["token"]) is not str:
                 raise ConfigError('Backend "%s" token must be a string' % name)
-            if "timeout" in meta and (type(meta["timeout"]) not in (int, float)
-                    or not math.isfinite(meta["timeout"]) or meta["timeout"] <= 0):
-                raise ConfigError('Backend "%s" timeout must be finite and positive' % name)
+            if "timeout" in meta:
+                _positive_finite(meta["timeout"], 'Backend "%s" timeout' % name)
         elif "decision_adapter" in meta:
             raise ConfigError('Backend "%s" decision_adapter requires type decision' % name)
         if meta["type"] == "conversion":
@@ -123,11 +199,7 @@ def validate(cfg):
             if "heartbeat" in meta:
                 # WS keepalive ping interval, seconds; guards long sessions
                 # against silent half-open connections.
-                value = meta["heartbeat"]
-                if type(value) not in (int, float) or not math.isfinite(value) \
-                        or value <= 0:
-                    raise ConfigError(
-                        'Backend "%s" heartbeat must be finite and positive' % name)
+                _positive_finite(meta["heartbeat"], 'Backend "%s" heartbeat' % name)
         if "decision_limits" in meta:
             limits = meta["decision_limits"]
             if meta["type"] != "decision" or type(limits) is not dict:
@@ -146,10 +218,7 @@ def validate(cfg):
                     name)
 
         if "timeout" in meta:
-            value = meta["timeout"]
-            if type(value) not in (int, float) or value <= 0:
-                raise ConfigError(
-                    'Backend "%s" timeout must be a positive number' % name)
+            _positive_finite(meta["timeout"], 'Backend "%s" timeout' % name)
 
         _validate_rate_limit(meta.get("rate_limit", {}),
             'Backend "%s" ' % name)
@@ -170,6 +239,14 @@ def validate(cfg):
             reserve = meta.get("reasoning", {}).get("reserve_content_tokens")
             if reserve is not None and default is not None and reserve >= default:
                 raise ConfigError('Backend "%s" reserve must be below default budget' % name)
+        _backend_url(meta.get("url"), 'Backend "%s" url' % name)
+        _text(meta.get("device"), 'Backend "%s" device' % name)
+        if meta["type"] != "decision":
+            _text(meta.get("token"), 'Backend "%s" token' % name, allow_empty=True)
+        if meta.get("model") is not None:
+            _text(meta["model"], 'Backend "%s" model' % name)
+        if "verify_ssl" in meta and type(meta["verify_ssl"]) is not bool:
+            raise ConfigError('Backend "%s" verify_ssl must be a boolean' % name)
 
 
 def _validate_budget_options(options, prefix, global_options=False):
@@ -257,6 +334,7 @@ def load(path=None, create=False):
         if db_uri := os.environ.get("LLMPROXY_DB_URI"):
             if "db" not in cfg:
                 cfg["db"] = {}
+            _table(cfg["db"], "db")
             cfg["db"]["uri"] = db_uri
             print("Loaded database URI from the LLMPROXY_DB_URI env var",
                 file=sys.stderr)

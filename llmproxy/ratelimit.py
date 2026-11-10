@@ -43,12 +43,13 @@ _ANON = "__anon__"
 
 
 def flush():
-    """Drop all in-memory counters.
+    """Reset rate windows without forgetting ownership of active slots.
 
-    Wired to SIGHUP (reload_config) so an operator can reset the windows without
-    a restart; also used between tests since the state is module-global."""
+    SIGHUP may change admission policy, but an older request still owns its
+    concurrency slot until its finally runs. Clearing that counter would both
+    admit too much work and let the old release decrement a newer request.
+    """
     _rpm.clear()
-    _concurrency.clear()
 
 
 def resolve(user, model, cfg):
