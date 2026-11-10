@@ -119,7 +119,7 @@ def validate(cfg):
     _table(cfg, "config")
     _global_fields(cfg)
     _validate_budget_options(cfg.get("budget", {}), "budget", global_options=True)
-    for key in ("client_max_size", "max_json_body"):
+    for key in ("client_max_size", "max_json_body", "max_multipart_fields", "max_multipart_text_bytes"):
         if key in cfg:
             value = cfg[key]
             if type(value) is not int or value <= 0:

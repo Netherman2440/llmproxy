@@ -23,6 +23,12 @@ timeout_read = 60  # response timeout (global default sock_read; override per-ba
 # client_max_size). Default 32 MiB.
 #max_json_body = 33554432
 
+# Multipart uploads have separate budgets for text (not file data) and fields.
+# Actual decoded request bytes remain bounded by client_max_size. Each part
+# also has at most32 headers of at most8190 bytes.
+#max_multipart_fields = 128
+#max_multipart_text_bytes = 65536
+
 # Seconds to cache a successful API-key lookup in memory. Without it every
 # request -- including one that is about to be rejected -- costs a database
 # round trip. Default 5; set 0 to disable and query the database every time.

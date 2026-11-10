@@ -964,7 +964,7 @@ class TestMalformedBody(LLMProxyAppTestCase):
         ]
         # Supported aiohttp uses a small in-memory spool, then rolls to disk.
         # Track the actual allocation boundary, not only its disk fallback.
-        temporary_file = aiohttp.web_request.SpooledTemporaryFile
+        temporary_file = tempfile.SpooledTemporaryFile
         gc.disable()
         self.addCleanup(gc.enable)
 
@@ -987,7 +987,7 @@ class TestMalformedBody(LLMProxyAppTestCase):
                     spool_created.set()
                     return f
 
-                with mock.patch("aiohttp.web_request.SpooledTemporaryFile",
+                with mock.patch("llmproxy.body.SpooledTemporaryFile",
                             tracked_temporary_file), \
                         mock.patch.object(self.app, "_client_max_size",
                             50000), \
@@ -1030,9 +1030,9 @@ class TestMalformedBody(LLMProxyAppTestCase):
         ]
         for method, path, body, content_type in cases:
             with self.subTest(path=path):
-                with mock.patch.object(aiohttp.web.BaseRequest, method,
-                            fail), \
-                        self.assertLogs("aiohttp.server", level="ERROR"):
+                patcher = (mock.patch("llmproxy.body.read_multipart", fail) if method == "post"
+                    else mock.patch.object(aiohttp.web.BaseRequest, method, fail))
+                with patcher, self.assertLogs("aiohttp.server", level="ERROR"):
                     async with self._raw(path, body, content_type) as res:
                         self.assertEqual(res.status, 500)
 

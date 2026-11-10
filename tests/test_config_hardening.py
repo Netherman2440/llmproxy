@@ -53,6 +53,12 @@ class TestConfigHardening(unittest.TestCase):
             with self.subTest(backend_timeout=value):
                 self.reject(self.backend(timeout=value))
 
+    def test_multipart_limits_are_positive_integers(self):
+        for key in ("max_multipart_fields", "max_multipart_text_bytes"):
+            for value in (True, 0, -1, 1.5, "64"):
+                with self.subTest(key=key, value=value):
+                    self.reject({key: value})
+
     def test_backend_urls_have_supported_scheme_host_and_no_credentials(self):
         for value in (None, 12, "", " ", "inference:8000", "ftp://host", "file:///etc/passwd",
                       "http:///v1", "http://user:password@host", "https://host/#fragment",

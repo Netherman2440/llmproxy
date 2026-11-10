@@ -8,6 +8,7 @@ import aiohttp
 import yarl
 from aiohttp import http_exceptions
 
+from . import body as body_parser
 from . import budget, errors, metrics, ratelimit
 
 
@@ -73,7 +74,7 @@ async def _read_body(f_req):
     """Parse the JSON or multipart body, or raise a 400 if it is malformed."""
     multipart = f_req.content_type == "multipart/form-data"
     try:
-        body = await (f_req.post() if multipart else f_req.json())
+        body = await (body_parser.read_multipart(f_req) if multipart else f_req.json())
     except BaseException as e:
         # aiohttp only closes the temp files post() spools file parts to
         # after a successful post(). Otherwise they live on in its frame,

@@ -103,7 +103,7 @@ async def limit_request_body(req, handler):
     # (req._client_max_size is enforced during the read, so it also covers
     # chunked bodies with no Content-Length; aiohttp has no public per-route
     # limit), and reject early when the client declares an oversized body.
-    if req.path not in UPLOAD_PATHS:
+    if req.path not in UPLOAD_PATHS or req.content_type != "multipart/form-data":
         # Only upload routes consume multipart. On the JSON text endpoints a
         # multipart body would be parsed by aiohttp's post(): each non-file
         # field is read WHOLE into memory before _client_max_size is checked, so

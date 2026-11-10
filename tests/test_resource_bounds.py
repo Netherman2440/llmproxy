@@ -1,5 +1,7 @@
 import asyncio
+import gzip
 import inspect
+import json
 import logging
 import types
 import unittest
@@ -9,7 +11,8 @@ import aiohttp
 import aiohttp.test_utils
 import aiohttp.web
 
-from llmproxy import streaming
+from llmproxy import app as application
+from llmproxy import proxy, streaming
 
 
 class TestBoundedSSE(aiohttp.test_utils.AioHTTPTestCase):
@@ -175,6 +178,89 @@ class TestBoundedStreamResponse(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, [b"data: partial\n\n", b"data: final-usage\n\n"])
         self.assertEqual(writes, [b"data: partial\n\n"])
         self.assertEqual(aborts, [True])
+
+
+class TestInputParserBounds(aiohttp.test_utils.AioHTTPTestCase):
+    async def get_application(self):
+        app = aiohttp.web.Application(client_max_size=128 * 1024,
+            middlewares=[application.limit_request_body])
+        app["config"] = {"max_json_body": 128, "max_multipart_fields": 4,
+            "max_multipart_text_bytes": 64}
+
+        async def parse(request):
+            request["request_id"] = "synthetic-request-id"
+            data = await proxy._read_body(request)
+            upload = data.get("file")
+            return aiohttp.web.json_response({"model": data.get("model"),
+                "file_bytes": len(upload.file.read()) if upload is not None else 0})
+
+        app.router.add_post("/v1/audio/transcriptions", parse)
+        return app
+
+    async def test_json_on_upload_route_still_has_the_json_byte_cap(self):
+        async with self.client.post("/v1/audio/transcriptions",
+                json={"model": "stt", "text": "x" * 256}) as response:
+            self.assertEqual(response.status, 413)
+
+    async def test_chunked_compressed_json_is_limited_by_decoded_bytes(self):
+        compressed = gzip.compress(json.dumps({"model": "stt", "text": "x" * 4096}).encode())
+        self.assertLess(len(compressed), 128)
+
+        async def chunks():
+            for offset in range(0, len(compressed), 7):
+                yield compressed[offset:offset + 7]
+
+        async with self.client.post("/v1/audio/transcriptions", data=chunks(),
+                headers={"Content-Type": "application/json", "Content-Encoding": "gzip"}) as response:
+            self.assertEqual(response.status, 413)
+
+    async def test_multipart_text_part_has_a_separate_small_limit(self):
+        form = aiohttp.FormData()
+        form.add_field("model", "stt")
+        form.add_field("prompt", "x" * 128)
+        form.add_field("file", b"audio", filename="sample.pcm")
+        async with self.client.post("/v1/audio/transcriptions", data=form) as response:
+            self.assertEqual(response.status, 413)
+
+    async def test_many_empty_multipart_fields_cannot_bypass_the_byte_cap(self):
+        form = aiohttp.FormData()
+        form.add_field("model", "stt")
+        form.add_field("file", b"audio", filename="sample.pcm")
+        for index in range(5):
+            form.add_field("empty" + str(index), "")
+        async with self.client.post("/v1/audio/transcriptions", data=form) as response:
+            self.assertEqual(response.status, 413)
+
+    async def test_multipart_header_count_is_bounded_before_field_buffering(self):
+        payload = (b'--test-boundary\r\nContent-Disposition: form-data; name="model"\r\n'
+            + b"X-Small: value\r\n" * 40 + b"\r\nstt\r\n--test-boundary--\r\n")
+        async with self.client.post("/v1/audio/transcriptions", data=payload,
+                headers={"Content-Type": "multipart/form-data; boundary=test-boundary"}) as response:
+            self.assertEqual(response.status, 400)
+
+    async def test_valid_file_is_not_restricted_to_the_text_field_limit(self):
+        form = aiohttp.FormData()
+        form.add_field("model", "stt")
+        form.add_field("file", b"x" * 4096, filename="sample.pcm")
+        async with self.client.post("/v1/audio/transcriptions", data=form) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.json(), {"model": "stt", "file_bytes": 4096})
+
+    async def test_oversized_text_is_rejected_before_the_sender_finishes(self):
+        never = asyncio.Event()
+
+        async def chunks():
+            yield (b'--test-boundary\r\nContent-Disposition: form-data; name="prompt"\r\n\r\n'
+                   + b"x" * 16384)
+            await never.wait()
+
+        try:
+            async with asyncio.timeout(0.5):
+                async with self.client.post("/v1/audio/transcriptions", data=chunks(),
+                        headers={"Content-Type": "multipart/form-data; boundary=test-boundary"}) as response:
+                    self.assertEqual(response.status, 413)
+        except TimeoutError:
+            self.fail("Multipart text is still buffered until the entire field arrives")
 
 
 if __name__ == "__main__":
