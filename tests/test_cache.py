@@ -8,6 +8,7 @@ that key EXPIRY is still exact despite the cache.
 """
 
 import datetime
+import hashlib
 import unittest
 import unittest.mock
 
@@ -53,7 +54,7 @@ def _req(token="secret", ttl=5):
 
 
 def _row(expires=None):
-    return {"id": "u1", "secret": "abc", "expires": expires,
+    return {"id": "u1", "secret": hashlib.sha256(b"secret").hexdigest(), "expires": expires,
         "status": "active", "comment": ""}
 
 
@@ -140,14 +141,13 @@ class TestAuthCache(unittest.IsolatedAsyncioTestCase):
                 self.assertLess(auth._normalize_expires(value),
                     datetime.datetime.now(datetime.UTC))
 
-    async def test_unparseable_expires_is_not_cached(self):
+    async def test_unparseable_expires_is_rejected_even_if_database_returns_it(self):
         fake = _FakeDb([_row(expires="not-a-date")])
 
-        await self._auth(fake)
-        await self._auth(fake)
-
-        # Never cached, so every request re-queries -- fail safe, not fail open.
-        self.assertEqual(fake.calls, 2)
+        for ttl in (0, 5):
+            with self.subTest(ttl=ttl):
+                with self.assertRaises(aiohttp.web.HTTPUnauthorized):
+                    await self._auth(fake, ttl=ttl)
 
     async def test_negative_result_is_cached(self):
         fake = _FakeDb([])

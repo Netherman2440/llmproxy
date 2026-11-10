@@ -1,12 +1,14 @@
 import collections
 import datetime
 import hashlib
+import hmac
 import time
 
 import aiohttp.web
 
 from . import metrics
 from .db import DatabaseError, get_db
+from .expiry import normalize_expires as _normalize_expires, valid_expiry
 
 # Default TTL (seconds) for the in-process auth cache. 0 disables it.
 DEFAULT_CACHE_TTL = 5
@@ -26,10 +28,6 @@ CACHE_MAX_ENTRIES = 8192
 # than inside it so the dict handed to callers is identical on hit and miss.
 _cache = collections.OrderedDict()
 
-# Sentinel: this row's expires could not be parsed, so it must never be cached
-# (we cannot re-evaluate expiry in-process and would risk honouring a stale key).
-_UNPARSEABLE = object()
-
 
 def flush_cache():
     """Drop every cached lookup.
@@ -38,31 +36,6 @@ def flush_cache():
     keeps working, and this is the operator's lever to make that immediate
     without restarting the proxy."""
     _cache.clear()
-
-
-def _normalize_expires(value):
-    """Coerce a row's ``expires`` into an aware UTC datetime, or None.
-
-    SQLite hands back an ISO string (datetimes are stored via the isoformat
-    adapter registered in db.py); Mongo hands back a datetime that is already
-    aware because the client is built with tz_aware=True. Normalizing once, at
-    insertion, keeps the per-request check to a single comparison."""
-    if value is None:
-        return None
-
-    if isinstance(value, str):
-        try:
-            value = datetime.datetime.fromisoformat(value)
-        except ValueError:
-            return _UNPARSEABLE
-
-    if not isinstance(value, datetime.datetime):
-        return _UNPARSEABLE
-
-    if value.tzinfo is None:
-        return value.replace(tzinfo=datetime.UTC)
-
-    return value
 
 
 def _cache_get(digest, now):
@@ -87,7 +60,7 @@ def _cache_put(digest, row, expires_at, ttl, now):
 
 async def require_auth(req):
     scheme, _, token = req.headers.get("Authorization", "").partition(" ")
-    if scheme != "Bearer":
+    if scheme != "Bearer" or not token:
         raise aiohttp.web.HTTPUnauthorized(text="Unsupported authorization scheme")
 
     digest = hashlib.sha256(token.encode()).hexdigest()
@@ -100,12 +73,9 @@ async def require_auth(req):
         row, expires_at, _ = entry
         if row is None:
             raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
-        # Expiry is re-evaluated here rather than trusted from the cached
-        # lookup. user_list filters expired keys in the query, so a cached row
-        # would otherwise keep an expired key alive for the whole TTL — which
-        # matters most for exactly the short-lived keys expiry exists for.
-        if expires_at is not None \
-                and expires_at <= datetime.datetime.now(datetime.UTC):
+        # Expiry remains authoritative on both cache paths; corrupt dates
+        # never become unlimited access even if an adapter returned the row.
+        if not valid_expiry(expires_at, datetime.datetime.now(datetime.UTC)):
             del _cache[digest]
             raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
         # A copy, so a handler mutating the user dict cannot poison the cache.
@@ -128,11 +98,18 @@ async def require_auth(req):
             _cache_put(digest, None, None, min(ttl, NEGATIVE_CACHE_TTL), now)
         raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
 
-    row = rows[0]
+    # user_list deliberately supports prefix searches for the operator CLI.
+    # Authentication must independently require the full digest, regardless
+    # of adapter filtering or row order.
+    row = next((candidate for candidate in rows
+        if isinstance(candidate.get("secret"), str)
+        and hmac.compare_digest(candidate["secret"].encode(), digest.encode())), None)
+    if row is None or not valid_expiry(row.get("expires"),
+            datetime.datetime.now(datetime.UTC)):
+        raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
 
     if ttl > 0:
         expires_at = _normalize_expires(row.get("expires"))
-        if expires_at is not _UNPARSEABLE:
-            _cache_put(digest, dict(row), expires_at, ttl, now)
+        _cache_put(digest, dict(row), expires_at, ttl, now)
 
     return row

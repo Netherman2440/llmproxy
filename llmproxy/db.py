@@ -1,11 +1,12 @@
 import asyncio
 import datetime
 import decimal
-import hashlib
 import importlib.resources
 import logging
 import sqlite3
 import uuid
+
+from .expiry import valid_expiry
 
 logger = logging.getLogger(__name__)
 
@@ -273,21 +274,23 @@ class SqliteDatabase:
     async def user_list(self, secret_hash="", include_expired=False):
         try:
             cur = await self.db.execute("""
-                SELECT id, secret, expires,
-                    CASE WHEN CURRENT_TIMESTAMP >= expires THEN 'expired'
-                        ELSE 'active' END AS status,
-                    IFNULL(comment, '') AS comment
+                SELECT id, secret, expires, IFNULL(comment, '') AS comment
                 FROM api_key
                 WHERE type = 'LLM' AND secret LIKE ? || '%'
-                    AND (? OR expires > datetime() OR expires IS NULL)
-                """, (secret_hash, include_expired))
+                """, (secret_hash,))
         except sqlite3.DatabaseError as e:
             raise DatabaseError(e) from e
 
         rows = await cur.fetchall()
         await cur.close()
 
-        return rows
+        # SQLite's lexical comparisons mix ISO 'T' with a space; datetime()
+        # also truncates fractional seconds. Apply the same exact UTC policy
+        # as auth, including malformed data, to both CLI status and filtering.
+        now = datetime.datetime.now(datetime.UTC)
+        for row in rows:
+            row["status"] = "active" if valid_expiry(row["expires"], now) else "expired"
+        return rows if include_expired else [row for row in rows if row["status"] == "active"]
 
     async def user_update(self, user, **kwargs):
         assert kwargs.keys() <= {"expires", "comment"}
