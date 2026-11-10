@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bookworm@sha256:0f086103b026048cc50cb5da25ec435c023c5241a83fc44daea593377abc61c4 AS wheel
+FROM python:3.12-alpine@sha256:a61cbd76a882645de7f91423329fe43a67eed60d7da24f9e5331414bb3618b20 AS wheel
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore
 WORKDIR /build
 COPY requirements-build.lock /tmp/requirements-build.lock
@@ -8,12 +8,12 @@ COPY scripts scripts
 COPY llmproxy llmproxy
 RUN python -m build --wheel --no-isolation
 
-FROM python:3.12-slim-bookworm@sha256:0f086103b026048cc50cb5da25ec435c023c5241a83fc44daea593377abc61c4
+FROM python:3.12-alpine@sha256:a61cbd76a882645de7f91423329fe43a67eed60d7da24f9e5331414bb3618b20
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore \
     LLMPROXY_DB_URI=sqlite:///state/db.sqlite
-RUN groupadd --gid 10001 llmproxy \
-    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin llmproxy \
+RUN addgroup -S -g 10001 llmproxy \
+    && adduser -S -D -H -u 10001 -G llmproxy -s /sbin/nologin llmproxy \
     && mkdir -p /app /state /etc/llmproxy \
     && chown 10001:10001 /app /state
 WORKDIR /app
