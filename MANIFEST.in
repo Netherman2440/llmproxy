@@ -1,2 +1,3 @@
 include llmproxy/config.toml
 include llmproxy/schema.sql
+recursive-include llmproxy/migrations *.sql

@@ -1,12 +1,13 @@
 import asyncio
 import datetime
 import decimal
-import importlib.resources
 import logging
 import sqlite3
 import uuid
 
+from .admission import SqliteAdmission
 from .expiry import valid_expiry
+from .migrations import upgrade_sqlite
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +215,7 @@ class MongoDatabase:
             raise DatabaseError(e) from e
 
 
-class SqliteDatabase:
+class SqliteDatabase(SqliteAdmission):
     @classmethod
     async def create(cls, uri):
         import aiosqlite
@@ -226,22 +227,14 @@ class SqliteDatabase:
         self.db = await aiosqlite.connect(path)
         logger.debug("Connected to database")
 
-        # user_version is the schema-initialization marker (0 = uninitialized).
-        # schema.sql is idempotent (CREATE TABLE IF NOT EXISTS), so applying it
-        # to a version-0 database that already has the tables — e.g. one made
-        # with `sqlite3 db.sqlite < schema.sql`, which does not stamp
-        # user_version — is safe and simply heals the marker to 1. NOTE: this is
-        # a single-version init, not a migration ladder; a future schema v2 needs
-        # real migrations here, and a divergent v0 table would be accepted as-is
-        # (surfacing only at query time) rather than failing loudly at startup.
-        cur = await self.db.execute("PRAGMA user_version")
-        ver, = await cur.fetchone()
-        if ver == 0:
-            schema = importlib.resources.files("llmproxy") \
-                .joinpath("schema.sql").read_text()
-            await self.db.executescript(schema)
-            await self.db.execute("PRAGMA user_version = 1")
-            logger.info("Initialized database to version 1")
+        try:
+            await upgrade_sqlite(self.db)
+        except Exception as error:
+            await self.db.close()
+            raise DatabaseError("Database schema initialization failed") from error
+        except BaseException:
+            await self.db.close()
+            raise
 
         self.db.row_factory = self.dict_factory
 

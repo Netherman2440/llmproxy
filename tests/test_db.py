@@ -28,7 +28,7 @@ class TestSqliteInit(unittest.IsolatedAsyncioTestCase):
     documented `sqlite3 db.sqlite < schema.sql` setup produces (the sqlite CLI
     does not stamp user_version). Re-applying the schema must not crash, so the
     schema is idempotent (CREATE TABLE IF NOT EXISTS) and the initializer heals
-    the version marker to 1.
+    the version marker through the supported migration ladder.
     """
 
     def setUp(self):
@@ -38,7 +38,7 @@ class TestSqliteInit(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         os.unlink(self.path)
 
-    async def test_empty_db_is_initialized_to_version_1(self):
+    async def test_empty_db_is_initialized_to_version_2(self):
         self.assertEqual(_user_version(self.path), 0)  # precondition
 
         db = await SqliteDatabase.create("sqlite://%s" % self.path)
@@ -48,7 +48,7 @@ class TestSqliteInit(unittest.IsolatedAsyncioTestCase):
         finally:
             await db.close()
 
-        self.assertEqual(_user_version(self.path), 1)
+        self.assertEqual(_user_version(self.path), 2)
 
     async def test_preexisting_schema_does_not_crash(self):
         # Simulate `sqlite3 db.sqlite < schema.sql`: tables exist, version 0.
@@ -64,17 +64,17 @@ class TestSqliteInit(unittest.IsolatedAsyncioTestCase):
             await db.close()
 
         # Version healed so subsequent boots skip re-initialization.
-        self.assertEqual(_user_version(self.path), 1)
+        self.assertEqual(_user_version(self.path), 2)
 
-    async def test_reopen_at_version_1_is_noop(self):
-        # First create() initializes to v1; a second create() must take the
-        # skip path (user_version already 1) without error and preserve data.
+    async def test_reopen_at_version_2_preserves_data(self):
+        # First create() migrates to v2; reopening validates that schema
+        # without dropping or replacing any data.
         db = await SqliteDatabase.create("sqlite://%s" % self.path)
         await db.db.execute(
             "INSERT INTO api_key (id, secret, type) VALUES ('u', 'abc', 'LLM')")
         await db.db.commit()
         await db.close()
-        self.assertEqual(_user_version(self.path), 1)
+        self.assertEqual(_user_version(self.path), 2)
 
         db = await SqliteDatabase.create("sqlite://%s" % self.path)
         try:
@@ -101,7 +101,7 @@ class TestSqliteInit(unittest.IsolatedAsyncioTestCase):
         finally:
             await db.close()
 
-        self.assertEqual(_user_version(self.path), 1)
+        self.assertEqual(_user_version(self.path), 2)
 
     async def test_preexisting_data_is_preserved(self):
         # Healing an un-versioned database must never drop existing rows.
@@ -119,7 +119,7 @@ class TestSqliteInit(unittest.IsolatedAsyncioTestCase):
             await db.close()
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(_user_version(self.path), 1)
+        self.assertEqual(_user_version(self.path), 2)
 
 
 if __name__ == "__main__":
