@@ -14,6 +14,8 @@ import aiohttp.web
 from llmproxy import app as application
 from llmproxy import proxy, streaming
 
+from .test_proxy import LLMProxyAppTestCase
+
 
 class TestBoundedSSE(aiohttp.test_utils.AioHTTPTestCase):
     async def get_application(self):
@@ -261,6 +263,54 @@ class TestInputParserBounds(aiohttp.test_utils.AioHTTPTestCase):
                     self.assertEqual(response.status, 413)
         except TimeoutError:
             self.fail("Multipart text is still buffered until the entire field arrives")
+
+
+class TestResponseBounds(LLMProxyAppTestCase):
+    async def get_application(self):
+        app = await super().get_application()
+        app["config"]["max_response_bytes"] = 64
+        app["config"]["max_error_response_bytes"] = 32
+        app["config"]["files"] = {"max_poll_response_bytes": 64}
+        return app
+
+    async def test_every_nonstream_frontend_rejects_oversized_backend_before_billing(self):
+        cases = (
+            ("/v1/chat/completions", {"model": "mymodel", "messages": [{"role": "user", "content": "hi"}]}),
+            ("/v1/embeddings", {"model": "myembedding", "input": "hi"}),
+            ("/v1/messages", {"model": "mymodel", "max_tokens": 10,
+                "messages": [{"role": "user", "content": "hi"}]}),
+            ("/v1/responses", {"model": "mymodel", "input": "hi"}),
+            ("/v1/audio/transcriptions", "mywhisper"),
+            ("/v1/files/convert", "mymarker"),
+        )
+        for path, payload in cases:
+            with self.subTest(path=path):
+                if isinstance(payload, str):
+                    form = aiohttp.FormData()
+                    form.add_field("model", payload)
+                    form.add_field("file", b"synthetic-input", filename="sample.bin")
+                    kwargs = {"data": form}
+                else:
+                    kwargs = {"json": payload}
+                async with self.client.post(path,
+                        headers={"Authorization": "Bearer mytoken"}, **kwargs) as response:
+                    self.assertEqual(response.status, 502)
+        self.assertEqual(await self.get_events(), [])
+
+    async def test_chunked_nonstream_response_cannot_bypass_actual_byte_limit(self):
+        async with self.client.post("/v1/chat/completions",
+                headers={"Authorization": "Bearer mytoken"},
+                json={"model": "mymodel", "_chunked_nonstream": True,
+                    "messages": [{"role": "user", "content": "hi"}]}) as response:
+            self.assertEqual(response.status, 502)
+        self.assertEqual(await self.get_events(), [])
+
+    async def test_backend_error_body_is_also_bounded(self):
+        async with self.client.post("/v1/chat/completions",
+                headers={"Authorization": "Bearer mytoken"},
+                json={"model": "mymodel", "_trigger_error": 400}) as response:
+            self.assertEqual(response.status, 502)
+        self.assertEqual(await self.get_events(), [])
 
 
 if __name__ == "__main__":

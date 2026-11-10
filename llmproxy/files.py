@@ -225,7 +225,8 @@ async def convert(f_req):
         await proxy.check_response(app, b_name, b_res,
             request_id=f_req["request_id"])
 
-        body = await b_res.content.read()
+        body = await proxy.read_response(f_req, b_res, limit=app["config"].get("files", {}).get(
+            "max_poll_response_bytes", DEFAULT_MAX_POLL_RESPONSE_BYTES))
         data = _backend_json(f_req, b_name, body)
 
         # Datalab Marker returns HTTP 200 even on conversion failure, with

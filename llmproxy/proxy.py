@@ -12,6 +12,14 @@ from . import body as body_parser
 from . import budget, errors, metrics, ratelimit
 
 
+RESPONSE_MAX_BYTES = 32 * 1024 * 1024
+ERROR_RESPONSE_MAX_BYTES = 64 * 1024
+
+
+class ResponseTooLarge(ValueError):
+    """A bounded upstream response exceeded its byte budget."""
+
+
 CONTEXT_LENGTH_MARKERS = (
     "context length",
     "maximum context",
@@ -256,7 +264,7 @@ def backend_errors(f_req, b_name):
         raise aiohttp.web.HTTPGatewayTimeout() from e
     except (aiohttp.ClientConnectorError, aiohttp.ServerConnectionError,
             aiohttp.ClientPayloadError, aiohttp.ClientResponseError,
-            aiohttp.InvalidURL) as e:
+            aiohttp.InvalidURL, ResponseTooLarge) as e:
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
         metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "connection").inc()
@@ -283,7 +291,9 @@ async def check_response(app, b_name, b_res, expected_status=200,
     if b_res.status == expected_status:
         return
 
-    body = await read_limited(b_res, max_bytes) if max_bytes is not None else await b_res.read()
+    limit = max_bytes if max_bytes is not None else app["config"].get(
+        "max_error_response_bytes", ERROR_RESPONSE_MAX_BYTES)
+    body = await read_limited(b_res, limit)
 
     app.logger.error(
         'Backend "%s" unexpected status: request_id=%s status=%d '
@@ -312,11 +322,17 @@ async def check_response(app, b_name, b_res, expected_status=200,
     raise aiohttp.web.HTTPBadGateway()
 
 
+async def read_response(request, response, *, limit=None):
+    if limit is None:
+        limit = request.app["config"].get("max_response_bytes", RESPONSE_MAX_BYTES)
+    return await read_limited(response, limit)
+
+
 async def read_limited(response, limit):
     """Bound actual decoded bytes, including chunked/compressed responses."""
     body = bytearray()
     async for chunk in response.content.iter_chunked(min(65536, limit + 1)):
         if len(body) + len(chunk) > limit:
-            raise ValueError("response_too_large")
+            raise ResponseTooLarge("response_too_large")
         body.extend(chunk)
     return bytes(body)

@@ -20,7 +20,7 @@ async def embeddings(f_req):
         await proxy.check_response(app, b_name, b_res,
             request_id=f_req["request_id"])
 
-        body = await b_res.content.read()
+        body = await proxy.read_response(f_req, b_res)
         data = json.loads(body, parse_float=decimal.Decimal)
         f_hdrs = {"Content-Type":
             b_res.headers.get("Content-Type", "application/octet-stream")}

@@ -29,6 +29,11 @@ timeout_read = 60  # response timeout (global default sock_read; override per-ba
 #max_multipart_fields = 128
 #max_multipart_text_bytes = 65536
 
+# Decoded non-stream backend response/error budgets (bytes). File-conversion
+# results use files.max_poll_response_bytes instead, including synchronous POST.
+#max_response_bytes = 33554432
+#max_error_response_bytes = 65536
+
 # Seconds to cache a successful API-key lookup in memory. Without it every
 # request -- including one that is about to be rejected -- costs a database
 # round trip. Default 5; set 0 to disable and query the database every time.

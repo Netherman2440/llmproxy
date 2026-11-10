@@ -91,7 +91,7 @@ async def messages(f_req):
                     **budget.headers(f_req, stream=True)})
             usage = usage_acc.usage()
         else:
-            body = await b_res.content.read()
+            body = await proxy.read_response(f_req, b_res)
             data = json.loads(body, parse_float=decimal.Decimal)
             f_hdrs = {"Content-Type":
                 b_res.headers.get("Content-Type", "application/octet-stream")}
