@@ -58,6 +58,14 @@ http_origin = "*"
 #rpm = 60
 #concurrency = 5
 
+# Body-parser admission, before JSON/multipart reads and model selection.
+# Single-process counters survive SIGHUP; timeout bounds unfinished uploads.
+# Limits cannot be0/unlimited. Reload updates policy, never active owners.
+#[parsing]
+#concurrency = 4
+#per_user = 2
+#timeout = 30
+
 # Polling background file conversions (GET /v1/files/convert/{id}). Polls do
 # not count against rpm/concurrency, and for a background submission
 # (background=true) concurrency only bounds the upload: the job stays queued

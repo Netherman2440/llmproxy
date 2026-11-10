@@ -33,7 +33,7 @@ class TestConfigHardening(unittest.TestCase):
         for value in (None, False, [], "invalid", 3):
             with self.subTest(root_type=type(value).__name__):
                 self.reject(value)
-            for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance"):
+            for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance", "parsing"):
                 with self.subTest(table=key, value_type=type(value).__name__):
                     self.reject({key: value})
 
@@ -59,6 +59,15 @@ class TestConfigHardening(unittest.TestCase):
             for value in (True, 0, -1, 1.5, "64"):
                 with self.subTest(key=key, value=value):
                     self.reject({key: value})
+
+    def test_parsing_admission_limits_and_deadline_are_validated(self):
+        for key in ("concurrency", "per_user"):
+            for value in (True, 0, -1, 1.5, "4"):
+                with self.subTest(key=key, value=value):
+                    self.reject({"parsing": {key: value}})
+        for value in (None, True, 0, -1, float("inf"), float("nan"), "30"):
+            with self.subTest(timeout=value):
+                self.reject({"parsing": {"timeout": value}})
 
     def test_backend_urls_have_supported_scheme_host_and_no_credentials(self):
         for value in (None, 12, "", " ", "inference:8000", "ftp://host", "file:///etc/passwd",

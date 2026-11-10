@@ -63,9 +63,15 @@ def _backend_url(value, label):
 
 
 def _global_fields(cfg):
-    for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance"):
+    for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance", "parsing"):
         if key in cfg:
             _table(cfg[key], key)
+    parsing = cfg.get("parsing", {})
+    for key in ("concurrency", "per_user"):
+        if key in parsing and (type(parsing[key]) is not int or parsing[key] <= 0):
+            raise ConfigError("parsing.%s must be a positive integer" % key)
+    if "timeout" in parsing:
+        _positive_finite(parsing["timeout"], "parsing.timeout")
     for key in ("timeout_connect", "timeout_read", "write_timeout"):
         if key in cfg:
             _positive_finite(cfg[key], key)

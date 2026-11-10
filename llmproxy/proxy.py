@@ -135,7 +135,8 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
 
     if f_req.content_type not in ("application/json", "multipart/form-data"):
         raise aiohttp.web.HTTPUnsupportedMediaType()
-    f_body = await _read_body(f_req)
+    async with ratelimit.parser_slot(f_req, user):
+        f_body = await _read_body(f_req)
 
     b_name = f_body.get("model")
     # A missing model (absent or null) is a malformed request, as in the

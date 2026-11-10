@@ -128,9 +128,10 @@ def reload_config(app):
         return
 
     # Only backends, rate limits (and the file-conversion poll limits),
-    # provenance, budgets and auth cache settings are reloaded
+    # parsing admission, provenance, budgets and auth cache settings are reloaded
     app["config"]["backends"] = cfg.get("backends", {})
     app["config"]["rate_limit"] = cfg.get("rate_limit", {})
+    app["config"]["parsing"] = cfg.get("parsing", {})
     app["config"]["files"] = cfg.get("files", {})
     app["config"]["provenance"] = cfg.get("provenance", {})
     app["config"]["budget"] = cfg.get("budget", {})
@@ -211,6 +212,7 @@ async def create_app(cfg):
     )
 
     app["config"] = cfg
+    app["parser_admission"] = ratelimit.ParserAdmission()
 
     await check_db(app)
 

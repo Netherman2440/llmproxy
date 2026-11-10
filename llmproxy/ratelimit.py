@@ -16,6 +16,7 @@ all users) and a per-model limit is scoped to that model.
 Counters are process-local and in-memory; a restart resets the windows.
 """
 
+import asyncio
 import collections
 import contextlib
 import math
@@ -101,6 +102,43 @@ def _reject(f_req, dimension, limit, b_name, oldest=None):
     return errors.json_error(f_req, aiohttp.web.HTTPTooManyRequests, msg,
         openai_type="rate_limit_exceeded", anthropic_type="rate_limit_error",
         code="rate_limit_exceeded", headers=headers)
+
+
+class ParserAdmission:
+    """Application-owned counters; reload never replaces an active owner."""
+
+    def __init__(self):
+        self.active = 0
+        self.users = {}
+
+
+@contextlib.asynccontextmanager
+async def parser_slot(f_req, user):
+    cfg = f_req.app["config"].get("parsing", {})
+    state = f_req.app["parser_admission"]
+    uid = user["id"] if user else _ANON
+    global_limit = cfg.get("concurrency", 4)
+    user_limit = cfg.get("per_user", 2)
+    timeout = cfg.get("timeout", 30.0)
+    if state.active >= global_limit:
+        raise _reject(f_req, "parsing", global_limit, "__parsing__")
+    if state.users.get(uid, 0) >= user_limit:
+        raise _reject(f_req, "parsing", user_limit, "__parsing__")
+    state.active += 1
+    state.users[uid] = state.users.get(uid, 0) + 1
+    try:
+        try:
+            async with asyncio.timeout(timeout):
+                yield
+        except TimeoutError:
+            raise errors.json_error(f_req, aiohttp.web.HTTPRequestTimeout,
+                "Request body parsing timed out.", openai_type="timeout_error",
+                anthropic_type="api_error", code="request_timeout") from None
+    finally:
+        state.active -= 1
+        state.users[uid] -= 1
+        if state.users[uid] == 0:
+            del state.users[uid]
 
 
 @contextlib.asynccontextmanager
