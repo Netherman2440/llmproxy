@@ -144,6 +144,25 @@ async def unacked_receipts(db, session_id, limit=100):
     return await _call(db.accounting_unacked(session_id, limit))
 
 
+async def healthy(db):
+    return await _call(db.accounting_healthy())
+
+
+async def incomplete_receipts(db, session_id, limit=100):
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError('Invalid accounting receipt page limit')
+    return await _call(db.accounting_incomplete(session_id, limit))
+
+
+async def set_session_status(db, session_id, status, reason=None, *, expected_status=None):
+    if status not in ('pending', 'retry', 'blocked', 'settled') or reason not in (
+            None, 'backend_unavailable', 'storage_unavailable', 'contract', 'retention_gap', 'route_missing'):
+        raise ValueError('Invalid accounting session status')
+    if expected_status not in (None, 'bound'):
+        raise ValueError('Invalid accounting expected status')
+    await _call(db.accounting_status(session_id, status, reason, expected_status))
+
+
 async def mark_acked(db, event_id):
     await _call(db.accounting_ack(event_id))
 

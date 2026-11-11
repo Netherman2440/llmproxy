@@ -17,8 +17,9 @@ class SqliteAccounting:
                     raise AccountingConflict('Immutable session binding conflict')
             else:
                 await self.db.execute('''INSERT INTO accounting_session
-                    (session_id,binding,binding_hash,backend_instance_id) VALUES(?,?,?,?)''',
-                    (binding['session_id'], encode(binding), fingerprint, binding['backend_instance_id']))
+                    (session_id,binding,binding_hash,backend_instance_id,status) VALUES(?,?,?,?,?)''',
+                    (binding['session_id'], encode(binding), fingerprint, binding['backend_instance_id'],
+                     'bound' if binding['backend_instance_id'] is None else 'pending'))
             await self.db.commit()
         except BaseException:
             await self.db.rollback()
@@ -80,6 +81,8 @@ class SqliteAccounting:
                  value['session_id'], value['start_sample'] + value['sample_count'], value['start_sample']))).fetchone()
             if conflict is not None:
                 raise AccountingConflict('Receipt cursor, segment or sample range conflict')
+            await self.db.execute('''UPDATE accounting_session SET status='pending'
+                WHERE session_id=? AND status IN ('bound','settled')''', (value['session_id'],))
             quantity = str(parsed['quantity']) if parsed['quantity'] is not None else None
             await self.db.execute('''INSERT INTO accounting_receipt
                 (event_id,session_id,backend_instance_id,cursor,segment_id,start_sample,sample_count,
@@ -113,6 +116,25 @@ class SqliteAccounting:
             WHERE session_id=? AND acked_at IS NULL AND status IN ('billed','terminal')
             ORDER BY cursor LIMIT ?''', (session_id, limit))).fetchall()
         return [decode(row['receipt']) for row in rows]
+
+    async def accounting_healthy(self):
+        row = await (await self.db.execute('''SELECT session_id FROM accounting_session
+            WHERE status!='settled' AND last_error IS NOT NULL LIMIT 1''')).fetchone()
+        return row is None
+
+    async def accounting_incomplete(self, session_id, limit):
+        rows = await (await self.db.execute('''SELECT receipt FROM accounting_receipt
+            WHERE session_id=? AND status='pending' ORDER BY cursor LIMIT ?''',
+            (session_id, limit))).fetchall()
+        return [decode(row['receipt']) for row in rows]
+
+    async def accounting_status(self, session_id, status, reason, expected_status=None):
+        await self.db.execute('''UPDATE accounting_session SET status=?,last_error=? WHERE session_id=?
+            AND (? IS NULL OR status=?)
+            AND (?!='settled' OR NOT EXISTS (SELECT 1 FROM accounting_receipt
+                WHERE session_id=? AND (acked_at IS NULL OR status='pending')))''',
+            (status, reason, session_id, expected_status, expected_status, status, session_id))
+        await self.db.commit()
 
     async def accounting_ack(self, event_id):
         cursor = await self.db.execute('''UPDATE accounting_receipt SET acked_at=COALESCE(acked_at,?)

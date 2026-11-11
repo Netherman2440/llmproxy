@@ -5,6 +5,7 @@ import logging
 import sqlite3
 import uuid
 
+from .accounting_mongo import MongoAccounting
 from .accounting_sqlite import SqliteAccounting
 from .admission import MongoAdmission, SqliteAdmission
 from .expiry import valid_expiry
@@ -100,7 +101,7 @@ class DatabaseError(Exception):
     pass
 
 
-class MongoDatabase(MongoAdmission):
+class MongoDatabase(MongoAdmission, MongoAccounting):
     @classmethod
     async def create(cls, uri):
         # Fast path: a client for this URI already exists. Checked before the
