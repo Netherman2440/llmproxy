@@ -156,15 +156,15 @@ async def _connect_backend(req, b_name, b_cfg):
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
         metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "timeout").inc()
-        req.app.logger.error("Backend timeout: request_id=%s model=%s error=%s",
-            req["request_id"], b_name, e)
+        req.app.logger.error("Backend timeout: request_id=%s model=%s category=%s",
+            req["request_id"], b_name, type(e).__name__)
         raise aiohttp.web.HTTPGatewayTimeout() from e
     except aiohttp.ClientError as e:
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
         metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "connection").inc()
-        req.app.logger.error("Backend error: request_id=%s model=%s error=%s",
-            req["request_id"], b_name, e)
+        req.app.logger.error("Backend error: request_id=%s model=%s category=%s",
+            req["request_id"], b_name, type(e).__name__)
         raise aiohttp.web.HTTPBadGateway() from e
     metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
         time.monotonic() - b_start)

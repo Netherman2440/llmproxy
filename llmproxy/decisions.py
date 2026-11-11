@@ -48,7 +48,7 @@ async def respond(request, user, response, alias, backend, prepared, *, render=N
     try:
         try:
             await proxy.check_response(request.app, alias, response,
-                request_id=request["request_id"], max_bytes=limit, log_body=False)
+                request_id=request["request_id"], max_bytes=limit, map_context_length=False)
         except aiohttp.web.HTTPException as exc:
             if backend_error:
                 mapped = backend_error(request, exc)

@@ -232,9 +232,8 @@ async def convert(f_req):
         if not isinstance(data, dict) or data.get("success") is not True:
             app.logger.error(
                 "File-convert backend %s reported failure: request_id=%s "
-                "body_preview=%s",
-                b_name, f_req["request_id"],
-                body[:1024].decode("utf-8", errors="replace"))
+                "body_len=%d",
+                b_name, f_req["request_id"], len(body))
             exc = aiohttp.web.HTTPUnprocessableEntity(
                 content_type="application/json")
             exc.body = body
@@ -563,10 +562,10 @@ async def _claim(f_req, user, b_name, b_cfg, parsed, job_id, pages):
     if not isinstance(claimed, bool):
         app.logger.error(
             "File-convert backend %s did not confirm the delivery claim for "
-            "id=%s (status %d, body_preview=%s; a backend without claims "
+            "id=%s (status %d, body_len=%d; a backend without claims "
             "needs a file-processor update): request_id=%s",
             b_name, _log_ids(job_id, parsed.request_id)[0], status,
-            body[:256].decode("utf-8", errors="replace"), f_req["request_id"])
+            len(body), f_req["request_id"])
         raise aiohttp.web.HTTPBadGateway(
             text="File conversion backend did not confirm the delivery")
     return claimed
@@ -604,5 +603,5 @@ async def _send_in_slot(f_req, body, headers):
         if (transport := f_req.transport) is not None:
             transport.abort()
     except OSError as e:
-        app.logger.info("Client disconnected: %s", e)
+        app.logger.info("Client disconnected: category=%s", type(e).__name__)
     return f_res

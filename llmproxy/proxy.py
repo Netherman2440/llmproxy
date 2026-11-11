@@ -260,8 +260,8 @@ def backend_errors(f_req, b_name):
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
         metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "timeout").inc()
-        app.logger.error("Backend timeout: request_id=%s model=%s error=%s",
-            f_req["request_id"], b_name, e)
+        app.logger.error("Backend timeout: request_id=%s model=%s category=%s",
+            f_req["request_id"], b_name, type(e).__name__)
         raise aiohttp.web.HTTPGatewayTimeout() from e
     except (aiohttp.ClientConnectorError, aiohttp.ServerConnectionError,
             aiohttp.ClientPayloadError, aiohttp.ClientResponseError,
@@ -269,25 +269,26 @@ def backend_errors(f_req, b_name):
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
         metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "connection").inc()
-        app.logger.error("Backend error: request_id=%s model=%s error=%s",
-            f_req["request_id"], b_name, e)
+        app.logger.error("Backend error: request_id=%s model=%s category=%s",
+            f_req["request_id"], b_name, type(e).__name__)
         raise aiohttp.web.HTTPBadGateway() from e
     except aiohttp.ClientError as e:
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
         metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "client_error").inc()
-        app.logger.error("HTTP client error: request_id=%s model=%s error=%s",
-            f_req["request_id"], b_name, e)
+        app.logger.error("HTTP client error: request_id=%s model=%s category=%s",
+            f_req["request_id"], b_name, type(e).__name__)
         raise aiohttp.web.HTTPInternalServerError() from e
 
 
 async def check_response(app, b_name, b_res, expected_status=200,
-        request_id=None, *, max_bytes=None, log_body=True):
+        request_id=None, *, max_bytes=None, map_context_length=True):
     """Raise on backend responses that don't match the expected status.
 
     4xx errors are forwarded as-is (client errors from the backend).
     Everything else (5xx, unexpected 2xx/3xx) is masked with a generic 502
-    to avoid leaking internals or parsing unexpected response bodies.
+    to avoid leaking internals or parsing unexpected response bodies. Routine
+    logs retain status/length only; context-length mapping is independent of logging.
     """
     if b_res.status == expected_status:
         return
@@ -296,11 +297,11 @@ async def check_response(app, b_name, b_res, expected_status=200,
         "max_error_response_bytes", ERROR_RESPONSE_MAX_BYTES)
     body = await read_limited(b_res, limit)
 
+    # MIME strings and exception messages are backend-controlled too; neither
+    # is a safe substitute for a removed document/prompt body preview.
     app.logger.error(
-        'Backend "%s" unexpected status: request_id=%s status=%d '
-        'content_type=%s body_len=%d body_preview=%s',
-        b_name, request_id, b_res.status, b_res.content_type, len(body),
-        body[:1024].decode("utf-8", errors="replace") if log_body else "[omitted]")
+        'Backend "%s" unexpected status: request_id=%s status=%d body_len=%d',
+        b_name, request_id, b_res.status, len(body))
 
     if 400 <= b_res.status < 500:
         exc = aiohttp.web.HTTPBadRequest(content_type=b_res.content_type)
@@ -308,7 +309,7 @@ async def check_response(app, b_name, b_res, expected_status=200,
         exc.body = body
         raise exc
 
-    if log_body and b_res.status >= 500 and looks_like_context_length_error(body):
+    if map_context_length and b_res.status >= 500 and looks_like_context_length_error(body):
         raise aiohttp.web.HTTPUnprocessableEntity(
             text=json.dumps({
                 "error": {
