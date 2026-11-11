@@ -83,13 +83,23 @@ async def messages(f_req):
             request_id=f_req["request_id"])
 
         is_stream = "text/event-stream" in b_res.headers.get("Content-Type", "")
+        usage = None
+
+        async def settle():
+            nonlocal usage
+            if is_stream:
+                usage = usage_acc.usage()
+            await billing.record(f_req, user, {
+                "%s/%s/prompt" % (b_name, b_cfg["device"]): usage["prompt_tokens"],
+                "%s/%s/completion" % (b_name, b_cfg["device"]): usage["completion_tokens"],
+            })
+
         if is_stream:
             usage_acc = _MessagesStreamUsage()
             f_res = await streaming.stream_through(f_req, b_res,
                 budget.observer(f_req, usage_acc),
                 extra_headers={**provenance.headers(app["config"]),
-                    **budget.headers(f_req, stream=True)})
-            usage = usage_acc.usage()
+                    **budget.headers(f_req, stream=True)}, before_complete=settle)
         else:
             body = await proxy.read_response(f_req, b_res)
             data = json.loads(body, parse_float=decimal.Decimal)
@@ -104,12 +114,8 @@ async def messages(f_req):
             usage = {"prompt_tokens": _input_tokens(u),
                 "completion_tokens": u["output_tokens"]}
 
-        await billing.record(f_req, user, {
-            "%s/%s/prompt" % (b_name, b_cfg["device"]):
-                usage["prompt_tokens"],
-            "%s/%s/completion" % (b_name, b_cfg["device"]):
-                usage["completion_tokens"],
-        })
+        if not is_stream:
+            await settle()
 
         app.logger.info("Client used (messages): P:%d C:%d of %s",
             usage["prompt_tokens"], usage["completion_tokens"], b_name)

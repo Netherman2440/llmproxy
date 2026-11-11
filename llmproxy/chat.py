@@ -64,13 +64,23 @@ async def _chat(f_req):
             request_id=f_req["request_id"])
 
         is_stream = "text/event-stream" in b_res.headers.get("Content-Type", "")
+        usage = None
+
+        async def settle():
+            nonlocal usage
+            if is_stream:
+                usage = usage_acc.usage()
+            await billing.record(f_req, user, {
+                "%s/%s/prompt" % (b_name, b_cfg["device"]): usage["prompt_tokens"],
+                "%s/%s/completion" % (b_name, b_cfg["device"]): usage["completion_tokens"],
+            })
+
         if is_stream:
             usage_acc = _ChatStreamUsage()
             f_res = await streaming.stream_through(f_req, b_res,
                 budget.observer(f_req, usage_acc),
                 extra_headers={**provenance.headers(app["config"]),
-                    **budget.headers(f_req, stream=True)})
-            usage = usage_acc.usage()
+                    **budget.headers(f_req, stream=True)}, before_complete=settle)
         else:
             body = await proxy.read_response(f_req, b_res)
             data = json.loads(body, parse_float=decimal.Decimal)
@@ -81,12 +91,8 @@ async def _chat(f_req):
             f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
             usage = data["usage"]
 
-        await billing.record(f_req, user, {
-            "%s/%s/prompt" % (b_name, b_cfg["device"]):
-                usage["prompt_tokens"],
-            "%s/%s/completion" % (b_name, b_cfg["device"]):
-                usage["completion_tokens"],
-        })
+        if not is_stream:
+            await settle()
 
         app.logger.info("Client used: P:%d C:%d tokens of %s",
             usage["prompt_tokens"], usage["completion_tokens"],

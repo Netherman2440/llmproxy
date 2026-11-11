@@ -21,7 +21,17 @@ from llmproxy.db import get_db
 from . import mockbackend
 
 
+class ProductionTestServer(aiohttp.test_utils.TestServer):
+    async def _make_runner(self, **kwargs):
+        # Match app.main: disconnect must not cancel accounting after delivery.
+        kwargs['handler_cancellation'] = False
+        return aiohttp.web.AppRunner(self.app, **kwargs)
+
+
 class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
+    async def get_server(self, app):
+        return ProductionTestServer(app)
+
     async def asyncSetUp(self):
         # Don't care about type checkers
         warnings.simplefilter("ignore", category=aiohttp.web.NotAppKeyWarning)

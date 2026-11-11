@@ -103,7 +103,20 @@ def set_prepared_headers(f_req, f_res):
         f_res.headers["Access-Control-Allow-Origin"] = o
 
 
-async def stream_through(f_req, b_res, on_chunk, extra_headers=None):
+def is_terminal_event(chunk):
+    if chunk.strip() == b'data: [DONE]':
+        return True
+    event = parse_sse_event(chunk)
+    if not isinstance(event, dict):
+        return False
+    if event.get('type') in ('message_delta', 'message_stop', 'response.completed',
+            'response.incomplete', 'response.failed'):
+        return True
+    return ('usage' in event or any(choice.get('finish_reason') is not None
+        for choice in event.get('choices', []) if isinstance(choice, dict)))
+
+
+async def stream_through(f_req, b_res, on_chunk, extra_headers=None, *, before_complete=None):
     """Wire a chunked backend response to the client, invoking ``on_chunk`` for
     every SSE block (including during the post-disconnect drain). Returns the
     prepared client ``StreamResponse``.
@@ -153,9 +166,41 @@ async def stream_through(f_req, b_res, on_chunk, extra_headers=None):
     async def read_block():
         return await readuntil(b_res.content, b"\n\n")
 
-    await drain(read_block, f_res.write, on_chunk,
-        on_disconnect=on_disconnect, disconnected=disconnected,
-        write_timeout=write_timeout)
+    held, held_bytes = [], 0
+    deferred = False
+
+    async def write_block(chunk):
+        nonlocal deferred, held_bytes
+        if before_complete is not None and (deferred or is_terminal_event(chunk)):
+            deferred = True
+            held_bytes += len(chunk)
+            if held_bytes > 4 * SSE_FRAME_MAX_BYTES or len(held) >= 64:
+                raise ValueError('Deferred stream completion exceeds its budget')
+            held.append(chunk)
+        else:
+            await f_res.write(chunk)
+
+    try:
+        await drain(read_block, write_block, on_chunk,
+            on_disconnect=on_disconnect, disconnected=disconnected,
+            write_timeout=write_timeout)
+        # Persist final usage even if the consumer disconnected. Never send a
+        # success sentinel/terminal event or HTTP EOF before that commit.
+        if before_complete is not None:
+            await before_complete()
+    except BaseException:
+        f_res.force_close()
+        if f_req.transport is not None:
+            f_req.transport.abort()
+        raise
+
+    if not disconnected:
+        try:
+            for chunk in held:
+                async with asyncio.timeout(write_timeout):
+                    await f_res.write(chunk)
+        except (OSError, TimeoutError) as error:
+            on_disconnect(error)
 
     if not disconnected:
         try:

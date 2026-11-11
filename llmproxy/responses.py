@@ -140,13 +140,22 @@ async def responses(f_req):
                 request_id=f_req["request_id"])
 
             is_stream = "text/event-stream" in b_res.headers.get("Content-Type", "")
+            usage, billed = None, None
+
+            async def settle():
+                nonlocal usage, billed
+                if is_stream:
+                    usage = usage_acc.usage()
+                billed = to_billing_tokens(usage)
+                await billing.record(f_req, user,
+                    _bill_map(billed, b_name, b_cfg["device"]))
+
             if is_stream:
                 usage_acc = _ResponsesStreamUsage()
                 f_res = await streaming.stream_through(f_req, b_res,
                     budget.observer(f_req, usage_acc),
                     extra_headers={**provenance.headers(app["config"]),
-                        **budget.headers(f_req, stream=True)})
-                usage = usage_acc.usage()
+                        **budget.headers(f_req, stream=True)}, before_complete=settle)
             else:
                 body = await proxy.read_response(f_req, b_res)
                 data = json.loads(body, parse_float=decimal.Decimal)
@@ -158,9 +167,8 @@ async def responses(f_req):
                 f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
                 usage = data["usage"]
 
-            billed = to_billing_tokens(usage)
-            await billing.record(f_req, user,
-                _bill_map(billed, b_name, b_cfg["device"]))
+            if not is_stream:
+                await settle()
 
             app.logger.info("Client used (responses): P:%d C:%d of %s",
                 billed["prompt_tokens"], billed["completion_tokens"], b_name)

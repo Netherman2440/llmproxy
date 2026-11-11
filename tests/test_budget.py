@@ -270,6 +270,10 @@ class TestBudgetHTTP(aiohttp.test_utils.AioHTTPTestCase):
                     "delta": {"stop_reason": "max_tokens"},
                     "usage": {k: v for k, v in usage.items() if k != "input_tokens"}}).encode() + b"\n\n"]
         if body.get("stream"):
+            if self.block_stream and chat:
+                # A genuine pre-terminal frame lets a client disconnect while
+                # the later finish/usage is held behind the accounting barrier.
+                chunks.insert(0, b'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n')
             self.upstream_bytes.append(b"".join(chunks))
             res = aiohttp.web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await res.prepare(req)
