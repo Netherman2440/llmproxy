@@ -195,6 +195,10 @@ async def realtime(f_req):
     # backend connection.
     async with ratelimit.slot(f_req, user, b_name, b_cfg):
         with metrics.track_user_request(user, b_name):
+            if app['config'].get('realtime', {}).get('mode', 'legacy') == 'receipt-v1':
+                from .receipt_realtime import run
+                return await run(f_req, user, b_name, b_cfg)
+            # Explicit legacy mode has weaker, non-durable usage semantics.
             ws_backend = await _connect_backend(f_req, b_name, b_cfg)
             try:
                 ws_client = aiohttp.web.WebSocketResponse()

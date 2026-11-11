@@ -58,7 +58,7 @@ def _cache_put(digest, row, expires_at, ttl, now):
         _cache.popitem(last=False)
 
 
-async def require_auth(req):
+async def require_auth(req, *, fresh=False):
     scheme, _, token = req.headers.get("Authorization", "").partition(" ")
     if scheme != "Bearer" or not token:
         raise aiohttp.web.HTTPUnauthorized(text="Unsupported authorization scheme")
@@ -68,7 +68,7 @@ async def require_auth(req):
     ttl = req.app["config"].get("auth_cache_ttl", DEFAULT_CACHE_TTL)
     now = time.monotonic()
 
-    if ttl > 0 and (entry := _cache_get(digest, now)) is not None:
+    if not fresh and ttl > 0 and (entry := _cache_get(digest, now)) is not None:
         metrics.AUTH_CACHE_HITS_TOTAL.inc()
         row, expires_at, _ = entry
         if row is None:

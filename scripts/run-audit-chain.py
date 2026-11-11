@@ -33,6 +33,7 @@ async def initialize():
         'host="0.0.0.0"', 'port=8080', 'log_level="INFO"',
         'timeout_connect=10', 'timeout_read=60', 'write_timeout=10',
         '[db]', 'uri=' + json.dumps('sqlite://' + str(DATABASE)),
+        '[realtime]', 'mode="receipt-v1"',
         '[metrics]', 'enabled=false',
         '[rate_limit]', 'concurrency=2', 'rpm=60',
         '[backends.parakeet]', 'type="realtime"', 'device="a5000"',

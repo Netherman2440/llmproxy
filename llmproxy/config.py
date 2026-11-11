@@ -78,11 +78,26 @@ def _admission_fields(cfg):
         raise ConfigError("admission requires lease_ttl <=3600 and io_timeout <=lease_ttl/6")
 
 
+def _realtime_fields(cfg):
+    options = cfg.get('realtime', {})
+    if options.get('mode', 'legacy') not in ('legacy', 'receipt-v1'):
+        raise ConfigError('realtime.mode must be legacy or receipt-v1')
+    capacity = options.get('max_sessions', 4)
+    if type(capacity) is not int or not 1 <= capacity <= 64:
+        raise ConfigError('realtime.max_sessions must be an integer in 1..64')
+    for key, default, maximum in (('max_session_seconds', 3600, 3600), ('drain_timeout', 30, 30)):
+        value = options.get(key, default)
+        _positive_finite(value, 'realtime.' + key)
+        if value > maximum:
+            raise ConfigError('realtime.' + key + ' exceeds its limit')
+
+
 def _global_fields(cfg):
-    for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance", "parsing", "admission"):
+    for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance", "parsing", "admission", "realtime"):
         if key in cfg:
             _table(cfg[key], key)
     _admission_fields(cfg)
+    _realtime_fields(cfg)
     parsing = cfg.get("parsing", {})
     for key in ("concurrency", "per_user"):
         if key in parsing and (type(parsing[key]) is not int or parsing[key] <= 0):
