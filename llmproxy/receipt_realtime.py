@@ -11,6 +11,7 @@ import yarl
 
 from . import accounting, auth, metrics, provenance, reconciliation, streaming
 from .db import get_db
+from .session_auth import watch as watch_authorization
 from .usage import COMPLETED_EVENT, ID
 
 
@@ -53,40 +54,6 @@ async def setup(app):
     app.on_startup.append(start)
     app.on_shutdown.append(stop)
     app.on_cleanup.append(close)
-
-
-async def _fresh_user(request):
-    clone = request.clone()
-    clone.pop('db', None)
-    try:
-        return await auth.require_auth(clone, fresh=True)
-    finally:
-        db = clone.pop('db', None)
-        if db is not None:
-            await db.close()
-
-
-async def _watch(request, user, binding, started):
-    maximum = request.app['config']['realtime'].get('max_session_seconds', 3600)
-    next_check = time.monotonic()
-    while True:
-        if not auth.valid_expiry(user.get('expires'), datetime.datetime.now(datetime.UTC)):
-            return 1008
-        if time.monotonic() - started >= maximum:
-            return 1000
-        if time.monotonic() >= next_check:
-            try:
-                async with asyncio.timeout(0.5):
-                    fresh = await _fresh_user(request)
-                if accounting.binding_hash(binding | {'owner': fresh}) != accounting.binding_hash(binding):
-                    return 1008
-            except web.HTTPUnauthorized:
-                return 1008
-            except (Exception, web.GracefulExit):
-                # Fail closed on an unavailable authorization database.
-                return 1011
-            next_check = time.monotonic() + 1
-        await asyncio.sleep(0.2)
 
 
 async def _connect(app, config, name, sid):
@@ -214,7 +181,7 @@ async def run(request, user, name, config):
         await _send_client(request, client, message.data)
         up = asyncio.create_task(_up(client, backend, user, app['config'].get('write_timeout', 10)))
         down = asyncio.create_task(_down(request, db, binding, backend, client))
-        watch = asyncio.create_task(_watch(request, user, binding, started))
+        watch = asyncio.create_task(watch_authorization(request, user, started))
         tasks = [up, down, watch]
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         if watch in done:

@@ -17,6 +17,7 @@ was in flight when the worker died.
 
 import asyncio
 import decimal
+import datetime
 import json
 import time
 
@@ -25,6 +26,7 @@ import aiohttp.web
 import yarl
 
 from . import auth, billing, errors, metrics, proxy, provenance, ratelimit
+from .session_auth import watch
 
 COMPLETED = "conversation.item.input_audio_transcription.completed"
 
@@ -87,9 +89,11 @@ def _select_backend(req):
     return b_name, b_cfg
 
 
-async def _forward_up(ws_client, ws_backend):
-    """Client -> backend frames, verbatim."""
+async def _forward_up(ws_client, ws_backend, user):
+    """Forward only frames that still fit the authenticated lifetime."""
     async for msg in ws_client:
+        if not auth.valid_expiry(user.get('expires'), datetime.datetime.now(datetime.UTC)):
+            return 1008
         if msg.type == aiohttp.WSMsgType.TEXT:
             await ws_backend.send_str(msg.data)
         elif msg.type == aiohttp.WSMsgType.BINARY:
@@ -234,47 +238,46 @@ async def realtime(f_req):
                         metrics.AUDIO_SECONDS_TOTAL.labels(b_name).inc(
                             float(seconds))
 
-                up = asyncio.create_task(_forward_up(ws_client, ws_backend))
+                up = asyncio.create_task(_forward_up(ws_client, ws_backend, user))
                 down = asyncio.create_task(
                     _forward_down(ws_backend, ws_client, on_completed))
-                done, _ = await asyncio.wait({up, down},
-                    return_when=asyncio.FIRST_COMPLETED)
-
-                if down in done:
-                    b_close = ws_backend.close_code
-                    code, level = _map_close_code(b_close)
-                    if level == "critical":
-                        app.logger.critical(
-                            "Realtime backend %s rejected the session "
-                            "(close code %d): check its token and model "
-                            "config; request_id=%s", b_name, b_close,
-                            f_req["request_id"])
-                    elif level == "error":
-                        app.logger.error(
-                            "Realtime backend %s closed the session with "
-                            "code %d; request_id=%s", b_name, b_close,
-                            f_req["request_id"])
-                    await ws_client.close(code=code)
-                else:
-                    # The client went first. Let the down pump drain the
-                    # backend's in-flight reply for the grace period (it is
-                    # the only reader, so nothing is lost), THEN close the
-                    # backend so it ends its session.
-                    await asyncio.wait({down}, timeout=DRAIN_GRACE)
-                    await ws_backend.close(code=ws_client.close_code or 1000)
-                    # Up can also end on a BACKEND error (its send failed)
-                    # with the client still connected: make sure the client
-                    # gets a close frame. When the disconnect was the
-                    # client's this is a no-op (aiohttp already closed it).
-                    await ws_client.close(code=INTERNAL_ERROR)
-                up.cancel()
+                watcher = asyncio.create_task(watch(f_req, user, time.monotonic()))
+                tasks = (up, down, watcher)
+                code = INTERNAL_ERROR
                 try:
-                    await asyncio.wait_for(
-                        asyncio.gather(up, down, return_exceptions=True),
-                        DRAIN_TIMEOUT)
-                except asyncio.TimeoutError:
-                    down.cancel()
-                    await asyncio.gather(up, down, return_exceptions=True)
-                return ws_client
+                    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    if down in done:
+                        down.result()
+                        b_close = ws_backend.close_code
+                        code, level = _map_close_code(b_close)
+                        if level == 'critical':
+                            app.logger.critical('Realtime backend rejected session: model=%s request_id=%s',
+                                b_name, f_req['request_id'])
+                        elif level == 'error':
+                            app.logger.error('Realtime backend closed session: model=%s code=%s request_id=%s',
+                                b_name, b_close, f_req['request_id'])
+                    else:
+                        # Authorization expiry/revoke cancels NEW input first.
+                        # Completed work still drains against its historical owner.
+                        if watcher in done:
+                            code = watcher.result()
+                        elif up in done:
+                            code = up.result() or INTERNAL_ERROR
+                        up.cancel()
+                        await asyncio.gather(up, return_exceptions=True)
+                        await asyncio.wait({down}, timeout=DRAIN_GRACE)
+                        await ws_backend.close(code=1000)
+                    await ws_client.close(code=code)
+                    try:
+                        await asyncio.wait_for(asyncio.shield(down), DRAIN_TIMEOUT)
+                    except TimeoutError:
+                        down.cancel()
+                    return ws_client
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    if not ws_client.closed:
+                        await ws_client.close(code=code)
             finally:
                 await ws_backend.close()

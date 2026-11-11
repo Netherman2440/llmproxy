@@ -410,6 +410,9 @@ async def ws_realtime(req):
         except ValueError:
             evt = {}  # garbage in, garbage out: the pipe stays transparent
         if evt.get("type") == "input_audio_buffer.commit":
+            if started := control.get('commit_started'):
+                started.set()
+            await asyncio.sleep(control.get('completion_delay', 0))
             await ws.send_str(json.dumps({
                 "type": "conversation.item.input_audio_transcription.completed",
                 "item_id": "seg_1", "content_index": 0,
