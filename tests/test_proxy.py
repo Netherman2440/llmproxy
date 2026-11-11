@@ -19,6 +19,7 @@ from llmproxy.app import create_app, reload_config
 from llmproxy.db import get_db
 
 from . import mockbackend
+from .metrics_fixtures import ALICE_LABEL, AUTH_HEADERS as METRICS_AUTH, MYUSER_LABEL, TOKEN as METRICS_TOKEN
 
 
 class ProductionTestServer(aiohttp.test_utils.TestServer):
@@ -1221,6 +1222,17 @@ def _parse_metrics(text):
 
 
 class TestMetrics(LLMProxyAppTestCase):
+    async def asyncSetUp(self):
+        patcher = mock.patch.dict(os.environ, {'LLMPROXY_METRICS_TOKEN': METRICS_TOKEN})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        await super().asyncSetUp()
+
+    async def get_client(self, server):
+        # Existing metrics/counter tests scrape as the dedicated principal.
+        # Explicit LLM request headers still override this client default.
+        return aiohttp.test_utils.TestClient(server, headers=METRICS_AUTH)
+
     async def test_metrics_endpoint_exists(self):
         """The /metrics endpoint returns 200 and Prometheus content type."""
         async with self.client.request("GET", "/metrics") as res:
@@ -1344,8 +1356,8 @@ class TestMetrics(LLMProxyAppTestCase):
         self.assertIn("llmproxy_active_requests", text)
 
 
-    async def test_user_metrics_label_is_key_comment(self):
-        """Per-user metrics are labelled by the api-key comment."""
+    async def test_user_metrics_label_never_exposes_key_comment(self):
+        """Per-key metrics use a stable pseudonym instead of a human comment."""
         await self.insert_key("alicetoken", "aliceid", comment="Alice")
         body = {"model": "mymodel",
             "messages": [{"role": "user", "content": "hi"}]}
@@ -1359,12 +1371,12 @@ class TestMetrics(LLMProxyAppTestCase):
         # Unique user+model combination for this test, so the exact value
         # is assertable despite the process-global counter.
         lines = [line for line in parsed["llmproxy_user_requests_total"]
-            if 'user="Alice"' in line and 'model="mymodel"' in line]
+            if 'user="' + ALICE_LABEL + '"' in line and 'model="mymodel"' in line]
         self.assertEqual(len(lines), 1)
         self.assertEqual(float(lines[0].rsplit(" ", 1)[1]), 1.0)
 
-    async def test_user_metrics_label_falls_back_to_key_id(self):
-        """A key without a comment is labelled by its unique id."""
+    async def test_user_metrics_without_comment_still_hide_raw_key_id(self):
+        """Keys without comments also get a pseudonym, never their raw id."""
         body = {"model": "mymodel",
             "messages": [{"role": "user", "content": "hi"}]}
         async with self.client.request("POST", "/v1/chat/completions",
@@ -1374,7 +1386,7 @@ class TestMetrics(LLMProxyAppTestCase):
         async with self.client.request("GET", "/metrics") as res:
             parsed = _parse_metrics(await res.text())
 
-        found = any('user="myuser"' in line and 'model="mymodel"' in line
+        found = any('user="' + MYUSER_LABEL + '"' in line and 'model="mymodel"' in line
             for line in parsed["llmproxy_user_requests_total"])
         self.assertTrue(found,
             "llmproxy_user_requests_total missing myuser/mymodel")
@@ -1397,7 +1409,7 @@ class TestMetrics(LLMProxyAppTestCase):
         async with self.client.request("GET", "/metrics") as res:
             parsed = _parse_metrics(await res.text())
         mid = [line for line in parsed["llmproxy_user_active_requests"]
-            if 'user="myuser"' in line and 'model="slowok"' in line]
+            if 'user="' + MYUSER_LABEL + '"' in line and 'model="slowok"' in line]
         self.assertEqual(len(mid), 1)
         self.assertEqual(float(mid[0].rsplit(" ", 1)[1]), 1.0)
 
@@ -1405,7 +1417,7 @@ class TestMetrics(LLMProxyAppTestCase):
         async with self.client.request("GET", "/metrics") as res:
             parsed = _parse_metrics(await res.text())
         after = [line for line in parsed["llmproxy_user_active_requests"]
-            if 'user="myuser"' in line and 'model="slowok"' in line]
+            if 'user="' + MYUSER_LABEL + '"' in line and 'model="slowok"' in line]
         self.assertEqual(len(after), 1)
         self.assertEqual(float(after[0].rsplit(" ", 1)[1]), 0.0)
 
@@ -1420,7 +1432,7 @@ class TestMetrics(LLMProxyAppTestCase):
                 parsed = _parse_metrics(await res.text())
             line = next((line for line
                     in parsed["llmproxy_user_requests_total"]
-                    if 'user="myuser"' in line and 'model="mymodel"' in line),
+                    if 'user="' + MYUSER_LABEL + '"' in line and 'model="mymodel"' in line),
                 None)
             return float(line.rsplit(" ", 1)[1]) if line else 0.0
 

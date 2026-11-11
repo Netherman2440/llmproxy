@@ -293,9 +293,10 @@ segment — monitor `llmproxy_audio_seconds_total` and the billing stream.
 ## Monitoring (Prometheus metrics)
 
 The proxy exposes Prometheus-compatible metrics at `/metrics` by default.
-This endpoint can be scraped by Prometheus to monitor request volume,
-error rates, backend latency, and token usage — enabling alerts when
-traffic spikes or error rates increase.
+Scrape wymaga **osobnego Bearer credential**, nie klucza użytkownika LLM.
+Brak poprawnego sekretu oznacza401, a nie publiczny fallback. Endpoint ujawnia
+operational data i powinien pozostać na prywatnej sieci lub za TLS/RBAC.
+Procedura i ograniczenia: [metrics security](docs/metrics-security.md).
 
 ### Configuration
 
@@ -306,6 +307,7 @@ Metrics are controlled by the `[metrics]` section in
 [metrics]
 enabled = true        # set to false to disable the /metrics endpoint
 path = "/metrics"     # path under which metrics are served
+token_env = "LLMPROXY_METRICS_TOKEN"  # nazwa env, nigdy wartość sekretu
 ```
 
 ### Available metrics
@@ -321,16 +323,18 @@ path = "/metrics"     # path under which metrics are served
 | `llmproxy_tokens_total` | Counter | `model`, `type` | Tokens processed (prompt, completion, embedding) |
 | `llmproxy_audio_seconds_total` | Counter | `model` | Seconds of audio transcribed |
 | `llmproxy_file_conversions_total` | Counter | `model` | PDF pages converted to Markdown |
-| `llmproxy_user_requests_total` | Counter | `user`, `model` | Admitted requests per user (api-key comment, else key id) and model |
-| `llmproxy_user_active_requests` | Gauge | `user`, `model` | In-flight requests per user and model — non-zero series are who is connected right now |
+| `llmproxy_user_requests_total` | Counter | `user`, `model` | Admitted requests per API-key pseudonym and model; no raw id/comment |
+| `llmproxy_user_active_requests` | Gauge | `user`, `model` | In-flight requests per API-key pseudonym and model; pseudonymous, not anonymous data |
 
 ### Quick start (Kubernetes + Prometheus Operator)
 
 If you run Prometheus Operator (kube-prometheus-stack), the full path
 from deploy to Grafana is:
 
-1. **Deploy** the new llmproxy version — the `/metrics` endpoint is
-   active on port 8080 by default.
+1. **Provision a dedicated scrape secret**, zgodnie z
+   [runbookiem](docs/metrics-security.md), i przekaż go przez env reference
+   proxy oraz Secret/file reference Prometheusa. Następnie deploy wersji z auth
+   metrics. Bez sekretu `/metrics` na porcie8080 odpowiada401.
 
 2. **Create a ServiceMonitor** so Prometheus Operator automatically
    starts scraping:
@@ -377,6 +381,9 @@ If you run Prometheus without the Operator, add a scrape job to your
 scrape_configs:
   - job_name: "llmproxy"
     metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/llmproxy_metrics_token
     static_configs:
       - targets: ["llm-billing-proxy:8080"]
 ```

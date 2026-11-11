@@ -34,8 +34,8 @@ Prometheus.  The following metric families are provided:
 
   llmproxy_user_requests_total{user, model}
       Counter — requests admitted to a backend, per user and model. The
-      ``user`` label is the api-key comment (the human identity set with
-      llmproxyctl), falling back to the key id when there is no comment.
+      ``user`` label is a stable pseudonym of the API-key id, never its
+      comment, raw id, owner name or credential. This is not anonymization.
 
   llmproxy_user_active_requests{user, model}
       Gauge — in-flight requests per user and model; non-zero series show
@@ -47,6 +47,9 @@ Prometheus.  The following metric families are provided:
 """
 
 import contextlib
+import hashlib
+import hmac
+import os
 import time
 
 import aiohttp.web
@@ -208,15 +211,16 @@ REASONING_DETAILS_TOTAL = prometheus_client.Counter(
 
 
 def user_label(user):
-    """Human identity of an auth row for metric labels.
+    """Stable per-key pseudonym, independent of comments and secret rotation.
 
-    The comment is the owner's name as set at key creation (shown by
-    ``llmproxyctl user list``); a key without one falls back to its unique
-    id so the label is never empty.
+    Real key ids are random UUIDs/ObjectIds, not names. Hashing keeps the raw
+    database identifier out of exposition; pseudonyms remain access-controlled
+    operational data, not anonymous/public data.
     """
     if not user:
         return ANONYMOUS_USER
-    return user.get("comment") or user["id"]
+    identity = ('llmproxy:key:' + str(user['id'])).encode('utf-8')
+    return 'key_' + hashlib.sha256(identity).hexdigest()
 
 
 @contextlib.contextmanager
@@ -312,8 +316,21 @@ async def metrics_middleware(req, handler):
 # Endpoint
 # ---------------------------------------------------------------------------
 
+def _valid_scrape_secret(value):
+    return (isinstance(value, str) and 32 <= len(value) <= 256
+        and value.isascii() and all(33 <= ord(char) <= 126 for char in value))
+
+
 async def metrics_handler(req):
-    """Expose metrics in the Prometheus exposition format."""
+    """Dedicated header credential, no LLM authentication/cache/billing path."""
+    environment = req.app['config'].get('metrics', {}).get('token_env', 'LLMPROXY_METRICS_TOKEN')
+    expected = os.environ.get(environment)
+    scheme, separator, provided = req.headers.get('Authorization', '').partition(' ')
+    if (scheme.lower() != 'bearer' or not separator
+            or not _valid_scrape_secret(expected) or not _valid_scrape_secret(provided)
+            or not hmac.compare_digest(expected, provided)):
+        raise aiohttp.web.HTTPUnauthorized(text='Metrics credential required',
+            headers={'WWW-Authenticate': 'Bearer realm="metrics"'})
     data = prometheus_client.generate_latest(_REGISTRY)
     return aiohttp.web.Response(
         body=data,

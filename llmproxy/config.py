@@ -1,6 +1,7 @@
 import importlib.resources
 import math
 import os
+import re
 import sys
 import tomllib
 from urllib.parse import urlsplit
@@ -126,6 +127,12 @@ def _global_fields(cfg):
         if not valid:
             raise ConfigError("db.uri requires sqlite://path or mongodb://host")
     metrics = cfg.get("metrics", {})
+    if set(metrics) - {'enabled', 'path', 'token_env'}:
+        raise ConfigError('metrics contains unsupported options; use a credential reference')
+    if 'token_env' in metrics:
+        value = metrics['token_env']
+        if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', value):
+            raise ConfigError('metrics.token_env must name an environment variable')
     if "enabled" in metrics and type(metrics["enabled"]) is not bool:
         raise ConfigError("metrics.enabled must be a boolean")
     if "path" in metrics:

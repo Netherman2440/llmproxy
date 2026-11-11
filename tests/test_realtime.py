@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import time
 import unittest
 from unittest import mock
@@ -13,6 +14,7 @@ import aiohttp.web
 from llmproxy import config
 
 from . import mockbackend
+from .metrics_fixtures import AUTH_HEADERS as METRICS_AUTH, TOKEN as METRICS_TOKEN
 from .test_proxy import LLMProxyAppTestCase, _parse_metrics
 
 
@@ -234,8 +236,10 @@ class TestRealtimeHandshake(RealtimeTestCase):
 
 class TestRealtimeSession(RealtimeTestCase):
     async def audio_seconds(self):
-        async with self.client.request("GET", "/metrics") as res:
-            parsed = _parse_metrics(await res.text())
+        with mock.patch.dict(os.environ, {'LLMPROXY_METRICS_TOKEN': METRICS_TOKEN}):
+            async with self.client.request('GET', '/metrics', headers=METRICS_AUTH) as res:
+                self.assertEqual(res.status, 200)
+                parsed = _parse_metrics(await res.text())
         for line in parsed.get("llmproxy_audio_seconds_total", []):
             if 'model="myrealtime"' in line:
                 return float(line.rsplit(" ", 1)[1])

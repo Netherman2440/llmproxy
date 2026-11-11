@@ -108,6 +108,11 @@ enabled = true
 # Path under which the metrics endpoint is served.
 path = "/metrics"
 
+# Dedicated scrape credential reference, NOT a literal token or LLM API key.
+# Set this environment variable through your secret store (32..256 printable
+# non-whitespace ASCII characters). Missing/invalid secret makes scrape return 401.
+token_env = "LLMPROXY_METRICS_TOKEN"
+
 [db]
 
 # Database URI

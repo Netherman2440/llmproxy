@@ -23,6 +23,13 @@ spec:
       # If it uses a numeric port, use:
       #   targetPort: 8080
       path: /metrics
+      # Secret lives in the PodMonitor's namespace; proxy Deployment references
+      # the same credential under the environment name LLMPROXY_METRICS_TOKEN.
+      authorization:
+        type: Bearer
+        credentials:
+          name: llmproxy-metrics
+          key: token
       interval: 15s
       scrapeTimeout: 10s
   selector:

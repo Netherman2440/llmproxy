@@ -18,6 +18,7 @@ import aiohttp.web
 from llmproxy import auth, budget, config, metrics, provenance
 from llmproxy.app import create_app, reload_config
 from llmproxy.db import get_db
+from .metrics_fixtures import AUTH_HEADERS as METRICS_AUTH, TOKEN as METRICS_TOKEN
 
 
 AUTH = {"Authorization": "Bearer budget-test-token"}
@@ -186,6 +187,9 @@ class TestBudgetConfig(unittest.TestCase):
 
 class TestBudgetHTTP(aiohttp.test_utils.AioHTTPTestCase):
     async def asyncSetUp(self):
+        patcher = mock.patch.dict(os.environ, {'LLMPROXY_METRICS_TOKEN': METRICS_TOKEN})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         warnings.simplefilter("ignore", aiohttp.web.NotAppKeyWarning)
         auth.flush_cache()
         self.received = []
@@ -313,7 +317,8 @@ class TestBudgetHTTP(aiohttp.test_utils.AioHTTPTestCase):
         self.assertEqual(len(rows), 16)
         self.assertEqual(sum(row["quantity"] for row in rows if row["product"].endswith("/completion")), 80)
         self.assertTrue(all(row["product"].startswith("public/test/") for row in rows))
-        async with self.client.get("/metrics") as res:
+        async with self.client.get('/metrics', headers=METRICS_AUTH) as res:
+            self.assertEqual(res.status, 200)
             text = await res.text()
             self.assertIn('llmproxy_truncation_total{model="public",reason="unknown",stream="true"}', text)
             self.assertIn('llmproxy_reasoning_tokens_total{model="public"}', text)
@@ -360,7 +365,8 @@ class TestBudgetHTTP(aiohttp.test_utils.AioHTTPTestCase):
             async with self.client.get("/v1/models/unknown-%d" % i, headers=AUTH) as res:
                 self.assertEqual(res.status, 404)
                 self.assertEqual((await res.json())["error"]["code"], "model_not_found")
-        async with self.client.get("/metrics") as res:
+        async with self.client.get('/metrics', headers=METRICS_AUTH) as res:
+            self.assertEqual(res.status, 200)
             text = await res.text()
             self.assertIn('path="/v1/models/{id}"', text)
             self.assertNotIn('path="/v1/models/unknown-', text)

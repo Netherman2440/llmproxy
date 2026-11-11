@@ -56,5 +56,12 @@ spec:
       # If it uses a numeric port, replace with:
       #   targetPort: 8080
       path: /metrics
+      # Secret must exist in this ServiceMonitor's namespace. Inject the same
+      # key as LLMPROXY_METRICS_TOKEN into the proxy Deployment, never its LLM key.
+      authorization:
+        type: Bearer
+        credentials:
+          name: llmproxy-metrics
+          key: token
       interval: 15s
       scrapeTimeout: 10s

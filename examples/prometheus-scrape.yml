@@ -6,6 +6,9 @@
 #     - job_name: "llmproxy"
 #       scheme: http                # use https if TLS is enabled
 #       metrics_path: /metrics      # default; override via config.toml [metrics] path
+#       authorization:
+#         type: Bearer
+#         credentials_file: /run/secrets/llmproxy_metrics_token
 #       static_configs:
 #         - targets: ["llm-billing-proxy:8080"]
 #           # If running multiple replicas, list them all:
@@ -15,6 +18,11 @@ scrape_configs:
   - job_name: "llmproxy"
     scheme: http
     metrics_path: /metrics
+    # Dedicated credential, also injected into the proxy's LLMPROXY_METRICS_TOKEN.
+    # Mount a protected file; never put the literal token in this manifest.
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/llmproxy_metrics_token
     scrape_interval: 15s
     scrape_timeout: 10s
     static_configs:
