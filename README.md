@@ -467,16 +467,16 @@ sections. There's a template [compose.yml](compose.yml) in this repository.
 
 ### MongoDB
 
-1. Create a MongoDB user with the following privileges (see section
-[Database](#database) below for JS snippets):
-  * `{resource: {db: "cgc", collection: "api_keys"}, actions: ["find"]}`
-  * `{resource: {db: "billing", collection: "events_oneoff"}, actions: ["insert"]}`
+1. Provisionuj osobny runtime user według
+   [wersjonowanego kontraktu](docs/mongo-runtime-role.md), z profilami odpowiadającymi
+   konfiguracji. Auth wymaga `cgc.api_keys` **i** `cgc.rest_users`; financial authority
+   to `cgc.billing_record`, nie historyczne `billing.events_oneoff`.
 2. Copy [llmproxy/config.toml](llmproxy/config.toml) to your repository. A good
 relative path would be `secrets/llm-billing-proxy-config.toml`.
-3. In the config edit `uri` in section `db` so that it includes credentials for
-the Mongo user (e.g. `mongodb://myuser:mypass@host:27017/?authSource=cgc`).
-4. Add appropriate entries to your compose file's `services` and `secrets`
-sections. There's a template [compose.yml](compose.yml) in this repository.
+3. Dostarcz Mongo URI przez chroniony `LLMPROXY_DB_URI`/secret reference, ze
+   zgodnym authSource. Nie umieszczaj hasła w argv, przykładzie ani repo.
+4. Dodaj service/env i config Secret reference; wzór: [compose.yaml](compose.yaml).
+   Nie używaj runtime user do backup/restore lub fixture provisioning.
 5. Bring the new service up and verify it started correctly
 (e.g `docker compose up llm-billing-proxy`).
 
@@ -498,41 +498,16 @@ curl -v -H'Content-Type: application/json' -H'Authorization: Bearer token2' \
 If using SQLite see [llmproxy/schema.sql](llmproxy/schema.sql).
 Otherwise read on.
 
-This program uses MongoDB for authentication and completion logging.
-The schema is compatible with Comtergra GPU Core.
-The MongoDB user needs the following privileges:
+Mongo służy do auth, financial accounting i nowych durable journals/leases.
+Runtime schema i BSON IDs są zgodne z CGC consumer, ale role muszą obejmować
+**rzeczywiście używane** kolekcje/profiles. Nie kopiuj dawnych ról dla
+`billing.events_oneoff` ani zamienionych między databases role references.
 
-```js
-db.getSiblingDB("cgc").createRole({
-  role: "apiKeysReader",
-  privileges: [
-    {
-      resource: {db: "cgc", collection: "api_keys"},
-      actions: ["find"],
-    },
-  ],
-  roles: [],
-});
-db.getSiblingDB("billing").createRole({
-  role: "completionBillingWriter",
-  privileges: [
-    {
-      resource: {db: "billing", collection: "events_oneoff"},
-      actions: ["insert"],
-    },
-  ],
-  roles: [],
-});
-
-db.getSiblingDB("cgc").createUser({
-  user: "llm-billing-proxy",
-  pwd: "mypass",
-  roles: [
-    { role: "completionBillingWriter", db: "cgc" },
-    { role: "apiKeysReader", db: "billing" },
-  ],
-});
-```
+[Mongo runtime role](docs/mongo-runtime-role.md) zawiera tabelę minimalnych actions,
+metadata generator `python -m llmproxy.mongo_roles`, create-only admin provisioning
+z `passwordPrompt()` oraz warunki odbioru. Runtime nie ma prawa update/delete
+financial history, write auth collections, drop lub zarządzania użytkownikami.
+Sama rola nie jest dowodem backup/DR, pricing consumer ani konkretnej instalacji.
 
 ## Authentication
 
