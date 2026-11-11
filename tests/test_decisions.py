@@ -11,7 +11,7 @@ from unittest import mock
 import aiohttp.web
 import aiohttp.test_utils
 
-from llmproxy import basal, billing, config, decision_adapters, proxy, ratelimit
+from llmproxy import basal, billing, config, decision_adapters, ratelimit
 from llmproxy.decision_contract import DecisionCapabilities, DecisionResult, DecisionUsage
 from llmproxy.app import reload_config
 from llmproxy.db import DatabaseError, _billing_document, get_db
@@ -80,7 +80,7 @@ class TestDecisionConfig(unittest.TestCase):
         self.assertNotIn("model", first.body)
         self.assertEqual(first.question_count, 1)
         data = {"model": "basal", "answers": {"category": {"type": "choice", "choice": "yes",
-            "probabilities": {"yes": 1}, "confidence": 1}},
+            "probabilities": {"yes": 1, "no": 0}, "confidence": 1}},
             "usage": {"input_tokens": 15, "output_tokens": 0}}
         result = first.decode(data)
         self.assertEqual(result.usage, DecisionUsage(15, 0))
@@ -147,7 +147,8 @@ class TestDecisions(LLMProxyAppTestCase):
         self.app["config"]["budget"] = {"enabled": True}
         for path in ("/v1/systemone",):
             body = payload()
-            body["questions"].update({"q%d" % i: {"type": "choice"} for i in range(5)})
+            body["questions"].update({"q%d" % i: {"type": "choice",
+                "criteria": {"yes": "Yes", "no": "No"}} for i in range(5)})
             res = await self.post(body, path)
             self.assertEqual(res.status, 200, await res.text())
             self.assertIn("X-Request-ID", res.headers)
@@ -184,7 +185,9 @@ class TestDecisions(LLMProxyAppTestCase):
             "usage": {"input_tokens": 23, "output_tokens": 0},
             "backend_metadata": {"calibration": "native"}}, indent=2, ensure_ascii=False).encode()
         self.control["raw"] = raw
-        response = await self.post(path="/v1/systemone")
+        body = payload()
+        body['questions']['category']['criteria'] = {'tak': 'Tak', 'nie': 'Nie'}
+        response = await self.post(body, path="/v1/systemone")
         self.assertEqual(response.status, 200)
         text = await response.text()
         self.assertEqual(json.loads(text), json.loads(raw) | {"model": "basal-20-max"})
@@ -376,7 +379,7 @@ class TestDecisions(LLMProxyAppTestCase):
 
     async def test_large_aggregate_usage(self):
         self.control["response"] = {"model": "basal", "answers": {"category": {
-            "type": "choice", "choice": "yes", "probabilities": {"yes": 1}, "confidence": 1}},
+            "type": "choice", "choice": "yes", "probabilities": {"yes": 1, "no": 0}, "confidence": 1}},
             "usage": {"input_tokens": 100000, "output_tokens": 0}}
         self.assertEqual((await self.post()).status, 200)
         self.assertEqual((await self.get_events())[0]["quantity"], 100000)
@@ -404,7 +407,7 @@ class TestDecisions(LLMProxyAppTestCase):
             "labels": {"type": "multi", "selected": [], "set_confidence": 1,
                 "probabilities": {"damage": 0, "refund": 0}, "threshold": 0.5},
             "action": {"type": "act", "action": "defer", "confidence": 0.5,
-                "expected_costs": {"defer": 0.1, "true": 5},
+                "expected_costs": {"defer": 0.1, "true": 5, "false": 5},
                 "probabilities": {"true": 0.5, "false": 0.5}},
             "tool": {"type": "tool", "multi": True, "tools": [],
                 "set_confidence": 0.9, "probabilities": {"refund_order": 0.1}},

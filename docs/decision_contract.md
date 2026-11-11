@@ -53,6 +53,27 @@ client errors (400/413/422/429) pass through; other backend 4xx become 502.
 `/v1/decisions` is a separate OpenAI Decisions frontend; it does not accept
 native payloads.
 
+## Native answer identities
+
+Przygotowane pytanie zachowuje immutable snapshot dozwolonych wire keys. Choice i
+multi używają nazw criteria (także listy nazw); score lista daje indeksy tekstowe,
+a dict zachowuje nazwy. Noul ma true/false. Tool zachowuje nazwy definicji i extras:
+trzy standardowe extras dla single, brak domyślnych extras dla multi. Act rozróżnia
+outcome keys od action keys cost matrix oraz short-form wrong/defer.
+
+Decoder wymaga kompletnego zbioru probability keys zgodnego z tym snapshotem;
+choice/selected/refused/ranking i expected-cost actions nie mogą wprowadzić
+obcych identyfikatorów. Błąd odpowiedzi backendu daje502 przed financial write.
+Native request nadal nie jest przepisywany ani rozszerzany o nowe defaults —
+błędy jego semantyki obsługuje backend. Proxy nie uzna jednak błędnego200 za
+uprawnienie do naliczenia niezwalidowanego wyniku.
+
+Interpretację opcji porównano z publicznym tagged contract Basal
+[v2.8.0 question types](https://github.com/rkinas/basal/blob/v2.8.0/docs/QUESTION_TYPES.md)
+i [tool/action semantics](https://github.com/rkinas/basal/blob/v2.8.0/docs/FEATURES.md).
+To nie deklaracja wersji aktualnie wdrożonego engine ani nowy model/GPU test.
+Nie dodaje obsługi innych typów pytań z nowszego upstreamu.
+
 ## Adding another engine
 
 Implement `DecisionAdapter` and a per-request `PreparedDecision`, register the
