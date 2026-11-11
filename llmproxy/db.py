@@ -8,10 +8,16 @@ import uuid
 from .accounting_mongo import MongoAccounting
 from .accounting_sqlite import SqliteAccounting
 from .admission import MongoAdmission, SqliteAdmission
+from .delivery_mongo import MongoDelivery
+from .delivery_sqlite import SqliteDelivery
 from .expiry import valid_expiry
 from .migrations import upgrade_sqlite
 
 logger = logging.getLogger(__name__)
+# Driver DEBUG messages repr the queued SQL call, including all parameters.
+# Journals/auth contain private identifiers and digests; root DEBUG must not
+# turn them into routine logs. Keep only the driver's warning/error channel.
+logging.getLogger('aiosqlite').setLevel(logging.WARNING)
 
 # Process-global Mongo clients, keyed by URI. A Motor client owns a connection
 # pool and a topology monitor and is meant to live for the life of the process;
@@ -101,7 +107,7 @@ class DatabaseError(Exception):
     pass
 
 
-class MongoDatabase(MongoAdmission, MongoAccounting):
+class MongoDatabase(MongoAdmission, MongoAccounting, MongoDelivery):
     @classmethod
     async def create(cls, uri):
         # Fast path: a client for this URI already exists. Checked before the
@@ -217,7 +223,7 @@ class MongoDatabase(MongoAdmission, MongoAccounting):
             raise DatabaseError(e) from e
 
 
-class SqliteDatabase(SqliteAdmission, SqliteAccounting):
+class SqliteDatabase(SqliteAdmission, SqliteAccounting, SqliteDelivery):
     @classmethod
     async def create(cls, uri):
         import aiosqlite

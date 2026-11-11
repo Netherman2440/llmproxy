@@ -1,12 +1,13 @@
 import asyncio
 import contextlib
+import datetime
 import json
 
 import aiohttp
 import yarl
 
 from . import (
-    auth, billing, conversion_id, errors, metrics, provenance, proxy, streaming,
+    auth, billing, conversion_id, delivery, errors, metrics, provenance, proxy, streaming,
 )
 
 
@@ -19,12 +20,9 @@ OBJECT = "file.conversion"
 # Seconds a client should wait before polling a background conversion again.
 RETRY_AFTER = "5"
 
-# POST {job}/claim: the backend answers delivery_claimed=true exactly once per
-# completed job, which is when the proxy bills. The proxy keeps no state, so
-# this one-time claim is what makes "bill at the first pickup" hold across
-# repeated polls, restarts and replicas. Two-phase: the GET that fetches the
-# result changes nothing, and the claim is made only with a complete, valid
-# result in hand, so a fetch that fails or is refused never spends it.
+# Validate the complete result, persist a local obligation, THEN claim remotely.
+# A positive claim is durable before financial settlement. False/unknown without
+# local proof is unresolved, never a free result or a speculative second charge.
 CLAIM_PATH = "claim"
 
 # The claim answer is a one-field JSON object.
@@ -472,18 +470,48 @@ async def _completed(f_req, user, b_name, b_cfg, product, parsed, job, data):
         result["provenance"] = data["provenance"]
     body = json.dumps(result).encode()
 
-    claimed = await _claim(f_req, user, b_name, b_cfg, parsed, job["id"],
-        pages)
-    if claimed:
-        await billing.record(f_req, user, {product: pages})
-        app.logger.info("Client used: %d page(s) of %s", pages, b_name)
-        metrics.FILE_CONVERSIONS_TOTAL.labels(b_name).inc(pages)
+    from .db import get_db
+    db = await get_db(app['config']['db']['uri'], f_req)
+    try:
+        intent = await delivery.prepare_delivery(db, {
+            'owner': user, 'backend_alias': b_name, 'backend_url': b_cfg['url'],
+            'device': b_cfg['device'], 'request_id': parsed.request_id, 'job_id': parsed.request_id,
+            'created_at': datetime.datetime.now(datetime.UTC).isoformat()}, pages)
+        claimed = await _claim(f_req, user, b_name, b_cfg, parsed, job['id'], pages)
+        try:
+            billed = await delivery.settle_delivery(db, intent, {'delivery_claimed': claimed})
+        except delivery.DeliveryUnresolved:
+            # A concurrent first claimant can be committing its positive proof.
+            # Wait a finite time; a lost/pre-cutover claim never becomes free.
+            async with asyncio.timeout(1):
+                while True:
+                    await asyncio.sleep(0.01)
+                    try:
+                        billed = await delivery.settle_delivery(db, intent)
+                        break
+                    except delivery.DeliveryUnresolved:
+                        continue
+    except (delivery.DeliveryUnresolved, TimeoutError):
+        app.logger.warning('Delivery claim unresolved: intent=%s', intent['key'])
+        raise aiohttp.web.HTTPServiceUnavailable(text='Delivery outcome requires reconciliation',
+            headers={'Retry-After': RETRY_AFTER}) from None
+    except delivery.AccountingUnavailable:
+        raise aiohttp.web.HTTPServiceUnavailable(text='Delivery accounting unavailable',
+            headers={'Retry-After': RETRY_AFTER}) from None
+    except ValueError:
+        raise aiohttp.web.HTTPBadGateway(text='Conversion obligation conflict') from None
+    if billed:
+        app.logger.info('Client used: %d page(s) of %s', pages, b_name)
+        try:
+            metrics.FILE_CONVERSIONS_TOTAL.labels(b_name).inc(pages)
+        except Exception:
+            app.logger.error('Conversion telemetry failed after durable billing')
 
     log_id, log_rid = _log_ids(job["id"], parsed.request_id)
     app.logger.info(
         "Background conversion delivered: id=%s request_id=%s "
         "backend_request_id=%s pages=%d billed=%s",
-        log_id, f_req["request_id"], log_rid, pages, claimed)
+        log_id, f_req["request_id"], log_rid, pages, billed)
 
     return body
 
@@ -496,9 +524,9 @@ async def _claim(f_req, user, b_name, b_cfg, parsed, job_id, pages):
     without the claim the proxy cannot tell the first pickup from the tenth,
     and billing every poll overcharges while billing none gives it away.
 
-    A claim that fails without an answer (timeout, lost connection) may have
-    been granted all the same: then the first pickup is spent and these pages
-    are never billed. Logged with everything needed to bill them by hand.
+    An unanswered claim may have been granted. The prepared local obligation
+    remains unresolved; retry does not infer that false means a free result.
+    A positive response is persisted before the financial write.
     """
     app = f_req.app
 

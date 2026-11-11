@@ -12,7 +12,7 @@ import aiohttp.web
 import yarl
 
 from . import (
-    audio, auth, budget, chat, config, decision_openai, decisions, embeddings,
+    audio, auth, budget, chat, config, decision_openai, decisions, delivery, embeddings,
     files, messages, metrics, ratelimit, realtime, receipt_realtime, responses,
 )
 from .db import get_db, shutdown_all
@@ -215,6 +215,7 @@ async def create_app(cfg):
     app["parser_admission"] = ratelimit.ParserAdmission()
 
     await check_db(app)
+    delivery.setup(app)
     if cfg.get('realtime', {}).get('mode', 'legacy') == 'receipt-v1':
         await receipt_realtime.setup(app)
 

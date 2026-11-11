@@ -24,8 +24,11 @@ async def _execute_script(connection, script):
 async def upgrade_sqlite(connection):
     await connection.execute("BEGIN IMMEDIATE")
     try:
-        version, = await (await connection.execute("PRAGMA user_version")).fetchone()
-        if not 0 <= version <= 3:
+        # Execute and consume bounded metadata on the worker thread. A cursor
+        # retained by a cancelled auth-watch/schema-read can hold a SQLite
+        # read lock even after connection.close(), blocking financial COMMIT.
+        version, = (await connection.execute_fetchall('PRAGMA user_version'))[0]
+        if not 0 <= version <= 4:
             raise SchemaVersionError("Unsupported database schema version")
         if version == 0:
             schema = importlib.resources.files("llmproxy").joinpath("schema.sql").read_text()
@@ -41,7 +44,12 @@ async def upgrade_sqlite(connection):
             migration = importlib.resources.files(__package__).joinpath("003-accounting.sql").read_text()
             await _execute_script(connection, migration)
             await connection.execute("PRAGMA user_version=3")
-        columns = await (await connection.execute("PRAGMA table_info(admission_lease)")).fetchall()
+            version = 3
+        if version == 3:
+            migration = importlib.resources.files(__package__).joinpath('004-delivery.sql').read_text()
+            await _execute_script(connection, migration)
+            await connection.execute('PRAGMA user_version=4')
+        columns = await connection.execute_fetchall('PRAGMA table_info(admission_lease)')
         actual = [(row[1], row[2], row[3], row[5]) for row in columns]
         if actual != [("bucket", "TEXT", 1, 1), ("owner", "TEXT", 1, 2), ("expires_at", "REAL", 1, 0)]:
             raise SchemaVersionError("Incompatible admission lease schema")
@@ -50,8 +58,9 @@ async def upgrade_sqlite(connection):
                     'reconcile_cursor', 'status', 'last_error'}),
                 ('accounting_receipt', {'event_id', 'session_id', 'backend_instance_id', 'cursor',
                     'segment_id', 'start_sample', 'sample_count', 'fingerprint', 'receipt',
-                    'status', 'billing_event_id', 'quantity_exact', 'acked_at'})):
-            columns = await (await connection.execute('PRAGMA table_info(' + table + ')')).fetchall()
+                    'status', 'billing_event_id', 'quantity_exact', 'acked_at'}),
+                ('conversion_delivery', {'delivery_key', 'binding', 'fingerprint', 'state', 'financial_id'})):
+            columns = await connection.execute_fetchall('PRAGMA table_info(' + table + ')')
             if {row[1] for row in columns} != required or not any(row[5] == 1 for row in columns):
                 raise SchemaVersionError('Incompatible accounting schema')
         await connection.commit()

@@ -57,6 +57,18 @@ def decode(value):
     return json.loads(value, object_hook=object_hook)
 
 
+def clean_owner(value):
+    if type(value) is not dict:
+        raise ValueError('Invalid accounting owner')
+    owner = {'id': _identifier(value.get('id'))}
+    if '_user_id' in value:
+        owner['_user_id'] = _identifier(value['_user_id'])
+    for name in ('_namespace', '_org_id', '_tier'):
+        if name in value:
+            owner[name] = _text(value[name], name, empty=True)
+    return owner
+
+
 def clean_binding(value):
     if type(value) is not dict or type(value.get('owner')) is not dict:
         raise ValueError('Invalid accounting binding')
@@ -65,13 +77,7 @@ def clean_binding(value):
         raise ValueError('Invalid accounting session identifier')
     if instance is not None and (type(instance) is not str or not ID.fullmatch(instance)):
         raise ValueError('Invalid accounting backend identity')
-    owner = {'id': _identifier(value['owner'].get('id'))}
-    if '_user_id' in value['owner']:
-        owner['_user_id'] = _identifier(value['owner']['_user_id'])
-    for name in ('_namespace', '_org_id', '_tier'):
-        if name in value['owner']:
-            owner[name] = _text(value['owner'][name], name, empty=True)
-    result = {'session_id': sid, 'backend_instance_id': instance, 'owner': owner}
+    result = {'session_id': sid, 'backend_instance_id': instance, 'owner': clean_owner(value['owner'])}
     for name in ('request_id', 'backend_alias', 'backend_url', 'model_id', 'device'):
         result[name] = _text(value.get(name), name, maximum=512)
     if any('/' in result[name] for name in ('backend_alias', 'device')):
