@@ -99,7 +99,7 @@ class TestSqliteAdmissionLeases(unittest.IsolatedAsyncioTestCase):
             migrated = await SqliteDatabase.create('sqlite://' + path)
             try:
                 version = await (await migrated.db.execute('PRAGMA user_version')).fetchone()
-                self.assertEqual(version['user_version'], 4)
+                self.assertEqual(version['user_version'], 5)
                 self.assertEqual(len(await migrated.user_list('synthetic')), 1)
                 self.assertEqual(await (await migrated.db.execute('SELECT * FROM admission_lease')).fetchall(), [])
             finally:

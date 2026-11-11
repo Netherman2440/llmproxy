@@ -89,6 +89,8 @@ async def recover_once(app, limit=100):
 
 
 def setup(app):
+    from . import attempts
+
     async def loop():
         while True:
             try:
@@ -97,6 +99,11 @@ def setup(app):
             except Exception as error:
                 app['delivery_recovery_healthy'] = False
                 app.logger.error('Delivery recovery failed: category=%s', type(error).__name__)
+            try:
+                await attempts.recover_once(app)
+            except Exception as error:
+                app['http_attempt_recovery_healthy'] = False
+                app.logger.error('HTTP attempt recovery failed: category=%s', type(error).__name__)
             await asyncio.sleep(5)
 
     async def start(app):

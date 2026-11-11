@@ -8,6 +8,8 @@ import uuid
 from .accounting_mongo import MongoAccounting
 from .accounting_sqlite import SqliteAccounting
 from .admission import MongoAdmission, SqliteAdmission
+from .attempts_mongo import MongoAttempts
+from .attempts_sqlite import SqliteAttempts
 from .delivery_mongo import MongoDelivery
 from .delivery_sqlite import SqliteDelivery
 from .expiry import valid_expiry
@@ -107,7 +109,7 @@ class DatabaseError(Exception):
     pass
 
 
-class MongoDatabase(MongoAdmission, MongoAccounting, MongoDelivery):
+class MongoDatabase(MongoAdmission, MongoAccounting, MongoDelivery, MongoAttempts):
     @classmethod
     async def create(cls, uri):
         # Fast path: a client for this URI already exists. Checked before the
@@ -223,7 +225,7 @@ class MongoDatabase(MongoAdmission, MongoAccounting, MongoDelivery):
             raise DatabaseError(e) from e
 
 
-class SqliteDatabase(SqliteAdmission, SqliteAccounting, SqliteDelivery):
+class SqliteDatabase(SqliteAdmission, SqliteAccounting, SqliteDelivery, SqliteAttempts):
     @classmethod
     async def create(cls, uri):
         import aiosqlite

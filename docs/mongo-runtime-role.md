@@ -20,6 +20,7 @@ runtime DB routingu. Wildcards i niepoprawne nazwy są odrzucane.
 | rest_users |find| wszystkie — historyczny owner/org/namespace/tier |
 | billing_record |find,insert| wszystkie — zapis i weryfikacja idempotentnego retry |
 | llmproxy_conversion_delivery |find,insert,update,createIndex| wszystkie — startup recovery retained debt |
+| llmproxy_http_attempt |find,insert,update,createIndex| wszystkie — durable HTTP/SSE usage/recovery |
 | llmproxy_accounting_session |find,insert,update,createIndex| receipt-v1 |
 | llmproxy_accounting_receipt |find,insert,update,createIndex| receipt-v1 |
 | admission_bucket |find,insert,update,createIndex| shared admission |
@@ -33,6 +34,9 @@ workflow i zmiany adaptera — samo odebranie createIndex zepsuje startup.
 Delivery recovery działa nawet po usunięciu conversion backend z bieżącej
 konfiguracji, więc bazowa rola nadal obejmuje retained delivery ledger. Wyłączenie
 backendu nie jest upoważnieniem do zapomnienia wcześniejszego zobowiązania.
+HTTP/SSE journal również należy do baseline: zanim upstream przyjmie request,
+proxy utrwala owner/source, potem confirmed usage i dopiero finance. Wymaga to
+jawnego rozszerzenia dotychczasowej roli o `llmproxy_http_attempt` przed rolloutem.
 Nie używamy starego `billing.events_oneoff`: authority to `cgc.billing_record`.
 
 ## Provisioning administracyjny

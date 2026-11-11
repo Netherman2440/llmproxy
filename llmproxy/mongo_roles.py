@@ -13,7 +13,7 @@ def runtime_privileges(database='cgc', *, receipt_v1=False, shared_admission=Fal
         'billing_record': ['find', 'insert']}
     # Delivery recovery runs regardless of the currently configured backends:
     # removing a backend must not erase its retained financial obligations.
-    journals = ['llmproxy_conversion_delivery']
+    journals = ['llmproxy_conversion_delivery', 'llmproxy_http_attempt']
     if receipt_v1:
         journals += ['llmproxy_accounting_session', 'llmproxy_accounting_receipt']
     if shared_admission:

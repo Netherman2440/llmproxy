@@ -28,7 +28,7 @@ async def upgrade_sqlite(connection):
         # retained by a cancelled auth-watch/schema-read can hold a SQLite
         # read lock even after connection.close(), blocking financial COMMIT.
         version, = (await connection.execute_fetchall('PRAGMA user_version'))[0]
-        if not 0 <= version <= 4:
+        if not 0 <= version <= 5:
             raise SchemaVersionError("Unsupported database schema version")
         if version == 0:
             schema = importlib.resources.files("llmproxy").joinpath("schema.sql").read_text()
@@ -49,6 +49,11 @@ async def upgrade_sqlite(connection):
             migration = importlib.resources.files(__package__).joinpath('004-delivery.sql').read_text()
             await _execute_script(connection, migration)
             await connection.execute('PRAGMA user_version=4')
+            version = 4
+        if version == 4:
+            migration = importlib.resources.files(__package__).joinpath('005-http-attempt.sql').read_text()
+            await _execute_script(connection, migration)
+            await connection.execute('PRAGMA user_version=5')
         columns = await connection.execute_fetchall('PRAGMA table_info(admission_lease)')
         actual = [(row[1], row[2], row[3], row[5]) for row in columns]
         if actual != [("bucket", "TEXT", 1, 1), ("owner", "TEXT", 1, 2), ("expires_at", "REAL", 1, 0)]:
@@ -59,7 +64,9 @@ async def upgrade_sqlite(connection):
                 ('accounting_receipt', {'event_id', 'session_id', 'backend_instance_id', 'cursor',
                     'segment_id', 'start_sample', 'sample_count', 'fingerprint', 'receipt',
                     'status', 'billing_event_id', 'quantity_exact', 'acked_at'}),
-                ('conversion_delivery', {'delivery_key', 'binding', 'fingerprint', 'state', 'financial_id'})):
+                ('conversion_delivery', {'delivery_key', 'binding', 'fingerprint', 'state', 'financial_id'}),
+                ('http_attempt', {'attempt_id', 'binding', 'fingerprint', 'state', 'resources', 'observed_at'}),
+                ('http_attempt_financial', {'attempt_id', 'product', 'financial_id'})):
             columns = await connection.execute_fetchall('PRAGMA table_info(' + table + ')')
             if {row[1] for row in columns} != required or not any(row[5] == 1 for row in columns):
                 raise SchemaVersionError('Incompatible accounting schema')

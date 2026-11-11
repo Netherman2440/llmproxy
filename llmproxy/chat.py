@@ -30,7 +30,7 @@ class _ChatStreamUsage:
         try:
             data = json.loads(raw, parse_float=decimal.Decimal)
         except json.JSONDecodeError:
-            logging.error("Failed parsing usage information: %s", raw)
+            logging.error("Malformed backend stream usage: body_len=%d", len(raw))
             raise
         return data["usage"]
 

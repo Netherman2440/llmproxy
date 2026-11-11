@@ -17,15 +17,15 @@ class TestMongoRuntimePrivileges(unittest.TestCase):
         self.assertEqual(actions['api_keys'], {'find'})
         self.assertEqual(actions['rest_users'], {'find'})
         self.assertEqual(actions['billing_record'], {'find', 'insert'})
-        self.assertEqual(set(actions), {'api_keys', 'rest_users', 'billing_record', 'llmproxy_conversion_delivery'})
+        self.assertEqual(set(actions), {'api_keys', 'rest_users', 'billing_record', 'llmproxy_conversion_delivery', 'llmproxy_http_attempt'})
         self.assertTrue(all(row['resource']['db'] == 'cgc' for row in privileges))
 
     def test_optional_profiles_add_only_their_own_journals(self):
         actions = self.actions(self.roles.runtime_privileges(receipt_v1=True, shared_admission=True))
         self.assertEqual(set(actions), {'api_keys', 'rest_users', 'billing_record',
-            'llmproxy_conversion_delivery', 'llmproxy_accounting_session',
+            'llmproxy_conversion_delivery', 'llmproxy_http_attempt', 'llmproxy_accounting_session',
             'llmproxy_accounting_receipt', 'admission_bucket'})
-        for name in ('llmproxy_conversion_delivery', 'llmproxy_accounting_session',
+        for name in ('llmproxy_conversion_delivery', 'llmproxy_http_attempt', 'llmproxy_accounting_session',
                      'llmproxy_accounting_receipt', 'admission_bucket'):
             self.assertEqual(actions[name], {'find', 'insert', 'update', 'createIndex'})
         forbidden = {'remove', 'dropCollection', 'dropDatabase', 'updateUser', 'grantRole', 'anyAction'}

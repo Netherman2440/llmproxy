@@ -9,7 +9,7 @@ import yarl
 from aiohttp import http_exceptions
 
 from . import body as body_parser
-from . import budget, errors, metrics, ratelimit
+from . import attempts, budget, errors, metrics, ratelimit
 
 
 RESPONSE_MAX_BYTES = 32 * 1024 * 1024
@@ -228,11 +228,13 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
             # backend, so it must not count as that user's model usage. The
             # in-flight gauge is released on every exit path (see finally).
             with metrics.track_user_request(user, b_name):
-                async with app["client"].post(
-                        b_url, headers=b_hdrs, data=b_body, ssl=ssl,
-                        timeout=timeout) as b_res:
-                    observe_backend_response(b_name, b_res, b_start)
-                    yield b_res, b_name, b_cfg
+                async with attempts.track_request(f_req, user, b_name, b_cfg):
+                    async with app["client"].post(
+                            b_url, headers=b_hdrs, data=b_body, ssl=ssl,
+                            timeout=timeout) as b_res:
+                        f_req['http_attempt_backend_status'] = b_res.status
+                        observe_backend_response(b_name, b_res, b_start)
+                        yield b_res, b_name, b_cfg
 
 
 def observe_backend_response(b_name, b_res, b_start):
