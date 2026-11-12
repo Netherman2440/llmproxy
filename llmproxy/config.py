@@ -184,6 +184,19 @@ def validate(cfg):
             raise ConfigError(
                 "auth_cache_ttl must be a non-negative integer")
 
+    if "auth_lookup_concurrency" in cfg:
+        value = cfg["auth_lookup_concurrency"]
+        if type(value) is not int or not 1 <= value <= 1024:
+            raise ConfigError("auth_lookup_concurrency must be an integer in 1..1024")
+    if "auth_lookup_timeout" in cfg:
+        value = cfg["auth_lookup_timeout"]
+        try:
+            valid = type(value) in (int, float) and 0 < value <= 60 and math.isfinite(value)
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise ConfigError("auth_lookup_timeout must be finite and in (0, 60]")
+
     if "provenance" in cfg:
         # Must be a table: `provenance = true` would otherwise only blow up at
         # request time inside cfg.get("provenance", {}).get(...).

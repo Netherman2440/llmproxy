@@ -1,3 +1,4 @@
+import asyncio
 import collections
 import datetime
 import hashlib
@@ -87,25 +88,39 @@ async def require_auth(req, *, fresh=False):
     # above the request never opens one.
     db = await get_db(req.app["config"]["db"]["uri"], req)
 
+    # Bounded auth work: distinct attacker-chosen digests cannot open an
+    # unbounded number of concurrent exact lookups ahead of admission.
+    # Waiting counts against the same deadline; saturation fails closed.
+    slots = req.app.get("auth_lookup_slots")
+    lookup = db.user_get(digest)
     try:
-        rows = await db.user_list(digest)
+        if slots is not None:
+            # Queue wait counts against the same deadline: a flood of distinct
+            # digests cannot pile up unbounded waiters ahead of admission.
+            async with asyncio.timeout(
+                    req.app["config"].get("auth_lookup_timeout", 5.0)):
+                async with slots:
+                    row = await lookup
+        else:
+            row = await lookup
+    except TimeoutError:
+        raise aiohttp.web.HTTPServiceUnavailable(
+            text="Authentication is busy") from None
     except DatabaseError as e:
         req.app.logger.critical(e)
         raise aiohttp.web.GracefulExit() from e
 
-    if not rows:
+    if row is None:
         if ttl > 0:
             _cache_put(digest, None, None, min(ttl, NEGATIVE_CACHE_TTL), now)
         raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
 
-    # user_list deliberately supports prefix searches for the operator CLI.
-    # Authentication must independently require the full digest, regardless
-    # of adapter filtering or row order.
-    row = next((candidate for candidate in rows
-        if isinstance(candidate.get("secret"), str)
-        and hmac.compare_digest(candidate["secret"].encode(), digest.encode())), None)
-    if row is None or not valid_expiry(row.get("expires"),
-            datetime.datetime.now(datetime.UTC)):
+    # user_get is an exact indexed point lookup, but the full-digest check
+    # stays: an adapter must never be trusted to have filtered exactly.
+    if not (isinstance(row.get("secret"), str)
+            and hmac.compare_digest(row["secret"].encode(), digest.encode())):
+        raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
+    if not valid_expiry(row.get("expires"), datetime.datetime.now(datetime.UTC)):
         raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
 
     if ttl > 0:

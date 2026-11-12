@@ -26,6 +26,9 @@ async def _validate_schema(connection):
     actual = [(row[1], row[2], row[3], row[5]) for row in columns]
     if actual != [('bucket', 'TEXT', 1, 1), ('owner', 'TEXT', 1, 2), ('expires_at', 'REAL', 1, 0)]:
         raise SchemaVersionError('Incompatible admission lease schema')
+    indexes = await connection.execute_fetchall('PRAGMA index_list(api_key)')
+    if not any(row[1] == 'api_key_type_secret' for row in indexes):
+        raise SchemaVersionError('Missing exact credential lookup index')
     for table, required in (
             ('accounting_session', {'session_id', 'binding', 'binding_hash', 'backend_instance_id',
                 'reconcile_cursor', 'status', 'last_error'}),
@@ -42,12 +45,12 @@ async def _validate_schema(connection):
 
 async def upgrade_sqlite(connection):
     current, = (await connection.execute_fetchall('PRAGMA user_version'))[0]
-    if current == 5:
+    if current == 6:
         # Current-schema connections need only bounded read-only validation;
         # authentication/admission must not compete for the financial writer.
         await _validate_schema(connection)
         return
-    if not 0 <= current <= 5:
+    if not 0 <= current <= 6:
         raise SchemaVersionError('Unsupported database schema version')
     await connection.execute("BEGIN IMMEDIATE")
     try:
@@ -81,6 +84,11 @@ async def upgrade_sqlite(connection):
             migration = importlib.resources.files(__package__).joinpath('005-http-attempt.sql').read_text()
             await _execute_script(connection, migration)
             await connection.execute('PRAGMA user_version=5')
+            version = 5
+        if version == 5:
+            migration = importlib.resources.files(__package__).joinpath('006-auth-index.sql').read_text()
+            await _execute_script(connection, migration)
+            await connection.execute('PRAGMA user_version=6')
         await _validate_schema(connection)
         await connection.commit()
     except BaseException:

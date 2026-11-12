@@ -13,7 +13,7 @@ przelicza tokenów na czas ani nie zmienia taryf.
 2. Backend usage musi dać dokładnie prompt/completion produktów wybranego modelu,
    z nieujemnymi całkowitymi tokenami. Proof i jego pierwszy observed_at są trwałe
    przed financial write. Conflicting proof/source/owner nie jest nadpisywany.
-3. SQLite5: cały zestaw financial rows + marker w jednym BEGIN IMMEDIATE/FULL.
+3. SQLite (aktualnie schema6): cały zestaw financial rows + marker w jednym BEGIN IMMEDIATE/FULL.
    Mongo: jeden stabilny BSON ObjectId, majority+journal, duplicate verify,
    a potem marker. Historyczna data finance to pierwszy observed usage, nie retry.
 4. Dopiero po settlement wychodzi terminal SSE/EOF lub gotowy JSON. Partials są
@@ -60,7 +60,8 @@ operatora; brak takiego API oznacza dalsze unresolved, nie guessed backfill.
 
 ## Rollout i backup
 
-SQLite5 jest add-only; zachowuje stare finance, receipt i conversion journals.
+Migracje SQLite są add-only (aktualnie schema6, w tym indeks exact lookup
+kluczy); zachowują stare finance, receipt i conversion journals.
 Stare binaria nie mogą otwierać v5. Mongo runtime role musi otrzymać actions dla
 konkretnego `cgc.llmproxy_http_attempt` według `mongo-runtime-role.md` przed rolloutem.
 Nie przyznawaj delete/update finance ani wildcard readWrite.

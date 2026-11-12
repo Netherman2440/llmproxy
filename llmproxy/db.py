@@ -171,6 +171,40 @@ class MongoDatabase(MongoAdmission, MongoAccounting, MongoDelivery, MongoAttempt
     async def user_create(self, secret_hash, expires=None, comment=None):
         raise NotImplementedError("not implemented for MongoDB")
 
+    async def user_get(self, secret_hash):
+        """Exact credential point lookup; None when the key is absent."""
+        import pymongo.errors
+
+        if not isinstance(secret_hash, str) or not secret_hash:
+            raise ValueError('Exact credential digest required')
+        try:
+            key = await self.db["cgc"]["api_keys"].find_one({
+                "access_level": "LLM",
+                "secret": secret_hash,
+                "$or": [
+                    {"date_expiry": None},
+                    {"date_expiry": {"$gt": datetime.datetime.now(datetime.UTC)}},
+                ],
+            })
+            if key is None:
+                return None
+            user = await self.db["cgc"]["rest_users"].find_one(
+                {"_id": key["user_id"]})
+            if user is None:
+                return None
+        except pymongo.errors.PyMongoError as e:
+            raise DatabaseError(e) from e
+        return {
+            "id": key["_id"],
+            "_user_id": key["user_id"],
+            "_namespace": user["namespace"],
+            "_org_id": str(user.get("org_id", "")),
+            "_tier": user.get("subscription_level", ""),
+            "secret": key["secret"],
+            "expires": key.get("date_expiry", None),
+            "comment": key.get("comment"),
+        }
+
     async def user_list(self, secret_hash="", include_expired=False):
         import pymongo.errors
 
@@ -275,6 +309,22 @@ class SqliteDatabase(SqliteAdmission, SqliteAccounting, SqliteDelivery, SqliteAt
         await self.db.commit()
 
         return id_
+
+    async def user_get(self, secret_hash):
+        """Exact credential point lookup (indexed); None when absent.
+
+        The operator CLI keeps ``user_list`` prefix search; authentication
+        must never scan the key table per request.
+        """
+        try:
+            rows = await self.db.execute_fetchall("""
+                SELECT id, secret, expires, IFNULL(comment, '') AS comment
+                FROM api_key
+                WHERE type = 'LLM' AND secret = ?
+                """, (secret_hash,))
+        except sqlite3.DatabaseError as e:
+            raise DatabaseError(e) from e
+        return rows[0] if rows else None
 
     async def user_list(self, secret_hash="", include_expired=False):
         try:

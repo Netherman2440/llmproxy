@@ -18,16 +18,19 @@ from llmproxy import auth, db
 
 
 class _FakeDb:
-    """Counts user_list calls so a test can prove a lookup was served from
+    """Counts user_get calls so a test can prove a lookup was served from
     memory rather than from the database."""
 
     def __init__(self, rows):
         self.rows = rows
         self.calls = 0
 
-    async def user_list(self, digest, include_expired=False):
+    async def user_get(self, digest):
         self.calls += 1
-        return list(self.rows)
+        return self.rows[0] if self.rows else None
+
+    async def user_list(self, digest, include_expired=False):
+        raise AssertionError('authentication must use the exact user_get lookup')
 
     async def close(self):
         pass

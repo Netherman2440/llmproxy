@@ -205,7 +205,7 @@ class TestDeliveryJournal(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rows, [{'api_key': 'old-owner', 'quantity_exact': '13', 'rid': 'old-request'}])
                 self.assertEqual(await self.api.pending_deliveries(upgraded), [])
                 version = await (await upgraded.db.execute('PRAGMA user_version')).fetchone()
-                self.assertEqual(version['user_version'], 5)
+                self.assertEqual(version['user_version'], 6)
             finally:
                 await upgraded.close()
 

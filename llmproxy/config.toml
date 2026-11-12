@@ -44,6 +44,13 @@ timeout_read = 60  # response timeout (global default sock_read; override per-ba
 # SIGHUP flushes the cache, making a revocation take effect at once.
 #auth_cache_ttl = 5
 
+# Bounded authentication work on cache misses: how many distinct credential
+# lookups may hit the database at once (queue waits within the timeout), and
+# the per-lookup deadline in seconds. Saturation answers 503 (fail-closed);
+# repeated identical keys stay in the cache above.
+#auth_lookup_concurrency = 16
+#auth_lookup_timeout = 5
+
 # Allowed HTTP origins
 # This value will be sent in the Access-Control-Allow-Origin response header.
 http_origin = "*"

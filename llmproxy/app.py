@@ -180,6 +180,11 @@ async def create_app(cfg):
             limit_request_body,
         ])
 
+    # Bounded concurrent exact credential lookups on cache misses (distinct
+    # attacker digests), and the deadline a queued lookup may wait.
+    app["auth_lookup_slots"] = asyncio.Semaphore(
+        cfg.get("auth_lookup_concurrency", 16))
+
     # A new GENERATIVE endpoint must add AI Act provenance marking itself
     # (there is no middleware for it -- see llmproxy/provenance.py):
     # provenance.mark() on the non-streaming branch, provenance.headers() via
