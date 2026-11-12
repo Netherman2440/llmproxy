@@ -15,8 +15,9 @@ STAGE = 'scope'
 
 
 def uri(username, password):
-    assert os.environ['AUDIT_NAMESPACE'] == 'izajac'
-    assert os.environ['MONGO_HOST'] == 'audit-stt-mongo'
+    if (os.environ.get('AUDIT_NAMESPACE') not in ('izajac', 'ci-audit')
+            or os.environ.get('MONGO_HOST') != 'audit-stt-mongo'):
+        raise ValueError('Explicit private audit target required')
     return ('mongodb://' + quote(username, safe='') + ':' + quote(password, safe='')
         + '@audit-stt-mongo:27017/?authSource=admin&replicaSet=auditstt')
 

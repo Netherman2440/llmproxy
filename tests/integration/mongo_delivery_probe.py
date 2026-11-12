@@ -11,8 +11,9 @@ STAGE = 'scope'
 
 
 def uri():
-    assert os.environ['AUDIT_NAMESPACE'] == 'izajac'
-    assert os.environ['MONGO_HOST'] == 'audit-stt-mongo'
+    if (os.environ.get('AUDIT_NAMESPACE') not in ('izajac', 'ci-audit')
+            or os.environ.get('MONGO_HOST') != 'audit-stt-mongo'):
+        raise ValueError('Explicit private audit target required')
     return ('mongodb://' + quote(os.environ['MONGO_ADMIN_USERNAME'], safe='') + ':'
         + quote(os.environ['MONGO_ADMIN_PASSWORD'], safe='')
         + '@audit-stt-mongo:27017/?authSource=admin&replicaSet=auditstt')
@@ -140,7 +141,7 @@ async def probe():
         else:
             raise AssertionError('Missing historical financial record was silently recreated')
         assert await finance.count_documents({'api_key_id': owner['id']}) == 3
-        print(json.dumps({'status': 'PASS', 'namespace': 'izajac', 'objectid': True,
+        print(json.dumps({'status': 'PASS', 'namespace': os.environ['AUDIT_NAMESPACE'], 'objectid': True,
             'one_bill_per_source': True, 'unknown_not_delivered': True,
             'lost_reply_recovered': True, 'two_processes_one_bill': True,
             'post_insert_crash_recovered': True, 'missing_historical_bill_not_recreated': True,

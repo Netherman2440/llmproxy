@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 import tomllib
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +80,23 @@ class TestReleaseWorkflows(unittest.TestCase):
         self.assertIn("--exit-code 1", text)
         self.assertIn("--severity HIGH,CRITICAL", text)
 
+    def test_private_release_mongo_gate_runs_fault_and_admission_suites_not_only_smoke(self):
+        text = (ROOT / '.gitlab-ci.yml').read_text()
+        block = text.split('\nmongo:\n', 1)[1].split('\nimage:\n', 1)[0]
+        paths = ['mongo_probe', 'mongo_admission_probe', 'mongo_accounting_probe',
+            'mongo_delivery_probe', 'mongo_role_probe']
+        positions = []
+        for name in paths:
+            command = 'PYTHONPATH=. python tests/integration/' + name + '.py'
+            with self.subTest(probe=name):
+                self.assertIn(command, block)
+            if command in block:
+                positions.append(block.index(command))
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn('test -z "${PYTHONOPTIMIZE:-}"', block)
+        self.assertNotIn('|| true', block)
+        self.assertRegex(text, r'needs:\s*\[image, scan, mongo\]')
+
     def test_compose_requires_explicit_image_and_persists_sqlite(self):
         text = (ROOT / "compose.yaml").read_text()
         self.assertIn("${LLMPROXY_IMAGE:?", text)
@@ -96,6 +114,21 @@ class TestMongoProbeScope(unittest.TestCase):
         self.assertIsNotNone(check, "Integration scope validator is missing")
         for namespace in ("izajac", "ci-audit"):
             self.assertEqual(check({"MONGO_HOST": "audit-stt-mongo", "AUDIT_NAMESPACE": namespace}), namespace)
+
+    def test_conversion_and_minimal_role_probes_accept_same_explicit_ci_audit_scope(self):
+        from tests.integration import mongo_delivery_probe, mongo_role_probe
+        environment = {'MONGO_HOST': 'audit-stt-mongo', 'AUDIT_NAMESPACE': 'ci-audit',
+            'MONGO_ADMIN_USERNAME': 'synthetic-ci', 'MONGO_ADMIN_PASSWORD': 'not-issued'}
+        with mock.patch.dict('os.environ', environment, clear=True):
+            with self.subTest(probe='conversion'):
+                self.assertTrue(mongo_delivery_probe.uri().startswith('mongodb://'))
+            with self.subTest(probe='minimal-role'):
+                self.assertTrue(mongo_role_probe.uri('synthetic-ci', 'not-issued').startswith('mongodb://'))
+        for namespace, host in (('production', 'audit-stt-mongo'), ('ci-audit', 'production')):
+            with mock.patch.dict('os.environ', dict(environment, AUDIT_NAMESPACE=namespace, MONGO_HOST=host), clear=True):
+                for function in (mongo_delivery_probe.uri, lambda: mongo_role_probe.uri('synthetic-ci', 'not-issued')):
+                    with self.subTest(namespace=namespace, host=host), self.assertRaises(ValueError):
+                        function()
 
     def test_other_hosts_or_namespaces_are_rejected_before_connection(self):
         from tests.integration import mongo_probe
