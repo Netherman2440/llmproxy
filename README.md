@@ -503,7 +503,7 @@ sqlite3 db.sqlite < llmproxy/schema.sql
 2. Copy [llmproxy/config.toml](llmproxy/config.toml) to your repository. A good
 relative path would be `secrets/llm-billing-proxy-config.toml`.
 3. Add appropriate entries to your compose file's `services` and `secrets`
-sections. There's a template [compose.yml](compose.yml) in this repository.
+sections. There's a template [compose.yaml](compose.yaml) in this repository.
 4. Bring the new service up and verify it started correctly
 (e.g `docker compose up llm-billing-proxy`).
 
@@ -602,19 +602,18 @@ counters show whether the cache is doing anything.
 If using SQLite see [llmproxy/schema.sql](llmproxy/schema.sql).
 Otherwise read on.
 
-When a user performs a completion, two events (prompt token and completion
-token counts) are inserted into the collection `billing.events_oneoff`.
+When a user performs a completion, two entries (prompt token and completion
+token counts) are inserted into the Mongo collection `cgc.billing_record`.
 These documents have the following fields:
 
-* `date_created` -- date and time when the request finished processing
-* `user_id` -- `user_id` of the API key
+* `created_at` -- date and time when the request finished processing
+* `user_id` -- owner id of the API key (`rest_users._id`)
 * `api_key_id` -- id of the API key
-* `product` -- a string in the following format: `MODEL/DEVICE/TYPE`, where
-    * `MODEL` is the name of the backend
-    * `DEVICE` is the name of the GPU where the model runs
-    * `TYPE` is `prompt`, `completion`, `embedding`, `transcription`, or
-      `conversion` (PDF pages for `/v1/files/convert`)
-* `quantity` -- token count
+* `org_id` / `tier` / `namespace` -- owner metadata for billing
+* `resources` -- map of `product` to quantity, where `product` is
+  `model/device/type` lowercased: `type` is `prompt`, `completion`,
+  `embedding`, `transcription`, or `conversion` (PDF pages for
+  `/v1/files/convert`)
 * `request_id` -- request ID to correlate prompt/completion counts
 
 ## EU AI Act provenance marking (Art. 50(2))

@@ -223,7 +223,8 @@ uri = "sqlite://db.sqlite"
 # Clients connect to wss://<proxy>/v1/realtime (optional ?model=); the proxy
 # authenticates them, opens the backend WebSocket with this token and pumps
 # frames both ways. usage.seconds of completed events is metered in
-# llmproxy_audio_seconds_total; billing events are not written yet.
+# llmproxy_audio_seconds_total and billed as one ONEOFF event per completed
+# segment (see README: Completion logging).
 #[backends.parakeet-realtime]
 #url = "https://parakeet.example.cgc-krk-01.comtegra.cloud"
 #token = "APP_TOKEN"           # the backend's endpoint key (bearer)

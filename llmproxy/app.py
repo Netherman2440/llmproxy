@@ -12,9 +12,10 @@ import aiohttp.web
 import yarl
 
 from . import (
-    audio, auth, budget, chat, config, decision_openai, decisions, delivery, embeddings,
+    audio, auth, chat, config, decision_openai, decisions, delivery, embeddings,
     files, messages, metrics, ratelimit, realtime, receipt_realtime, responses,
 )
+from .budget_headers import EXPOSE_HEADERS
 from .db import get_db, shutdown_all
 
 
@@ -86,7 +87,7 @@ async def add_cors_headers(req, handler):
 
 def _apply_cors(req, res):
     res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-    res.headers["Access-Control-Expose-Headers"] = budget.EXPOSE_HEADERS
+    res.headers["Access-Control-Expose-Headers"] = EXPOSE_HEADERS
     if o := req.app["config"].get("http_origin"):
         res.headers["Access-Control-Allow-Origin"] = o
 
