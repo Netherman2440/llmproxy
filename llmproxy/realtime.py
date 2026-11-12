@@ -19,6 +19,7 @@ import asyncio
 import decimal
 import datetime
 import json
+import math
 import time
 
 import aiohttp
@@ -110,10 +111,11 @@ async def _forward_down(ws_backend, ws_client, on_completed):
         if msg.type == aiohttp.WSMsgType.TEXT:
             try:
                 evt = json.loads(msg.data)
-                if isinstance(evt, dict) and evt.get("type") == COMPLETED:
-                    await on_completed(evt)
-            except ValueError:
-                pass  # not JSON: still forwarded, the pipe stays transparent
+            except json.JSONDecodeError:
+                evt = None  # unrelated non-JSON frames stay transparent
+            # Validation/finance failures must NOT be swallowed as JSON errors.
+            if isinstance(evt, dict) and evt.get('type') == COMPLETED:
+                await on_completed(evt)
             try:
                 await ws_client.send_str(msg.data)
             except (ConnectionError, aiohttp.ClientError):
@@ -213,30 +215,25 @@ async def realtime(f_req):
                 await ws_client.prepare(f_req)
 
                 async def on_completed(evt):
-                    usage = evt.get("usage") or {}
-                    seconds = usage.get("seconds")
-                    if isinstance(seconds, (int, float)) and seconds > 0:
-                        # Bill FIRST, in the offline order (record, log,
-                        # metric): one ONEOFF event per completed segment,
-                        # the same product shape as /v1/audio/transcriptions
-                        # (Decimal keeps the fractional-seconds path
-                        # identical on Mongo).
-                        await billing.record(f_req, user, {
-                            "%s/%s/transcription" % (b_name, b_cfg["device"]):
-                                decimal.Decimal(str(seconds)),
-                        })
-                        # billing.record reuses the session's cached
-                        # connection (get_db); close_db closes it when the
-                        # session ends.
-                        app.logger.info(
-                            "Client used: %.3f s of %s (realtime)",
-                            float(seconds), b_name)
-                        # The metric is the hook's LAST side effect (as in
-                        # audio.py): "metered" always means "billed", so the
-                        # drain tests that poll this metric never race an
-                        # in-flight write against their teardown.
-                        metrics.AUDIO_SECONDS_TOTAL.labels(b_name).inc(
-                            float(seconds))
+                    usage = evt.get('usage')
+                    seconds = usage.get('seconds') if isinstance(usage, dict) else None
+                    try:
+                        valid = (type(seconds) in (int, float)
+                            and math.isfinite(seconds) and seconds > 0)
+                    except (ValueError, OverflowError):
+                        valid = False
+                    if not valid:
+                        raise ValueError('Realtime backend returned invalid duration')
+                    # Bill FIRST, preserving legacy fractional quantity/product.
+                    # No invalid completed frame may escape as a free result.
+                    await billing.record(f_req, user, {
+                        '%s/%s/transcription' % (b_name, b_cfg['device']):
+                            decimal.Decimal(str(seconds)),
+                    })
+                    app.logger.info('Client used: %.3f s of %s (realtime)',
+                        float(seconds), b_name)
+                    # Metered always means billed; the hook's last side effect.
+                    metrics.AUDIO_SECONDS_TOTAL.labels(b_name).inc(float(seconds))
 
                 up = asyncio.create_task(_forward_up(ws_client, ws_backend, user))
                 down = asyncio.create_task(

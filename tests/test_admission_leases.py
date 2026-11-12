@@ -85,6 +85,25 @@ class TestSqliteAdmissionLeases(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.db.admission_acquire('delayed', 'replacement', 1, 30))
         self.assertFalse(await self.db.admission_release('delayed', 'old-owner'))
 
+    async def test_current_schema_connection_validation_does_not_take_financial_writer_lock(self):
+        await self.db.db.execute('BEGIN IMMEDIATE')
+        opening = asyncio.create_task(SqliteDatabase.create('sqlite://' + self.path))
+        opened = None
+        try:
+            done, _ = await asyncio.wait({opening}, timeout=0.03)
+            # Release a controlled competing financial writer even on RED, so
+            # no native SQLite worker is abandoned behind its busy timeout.
+            await self.db.db.rollback()
+            opened = await asyncio.wait_for(opening, 1)
+            self.assertTrue(done, 'Current-schema validation waits for a write lock before admission')
+        finally:
+            await self.db.db.rollback()
+            if opened is not None:
+                await opened.close()
+            elif not opening.done():
+                opening.cancel()
+                await asyncio.gather(opening, return_exceptions=True)
+
     async def test_two_processes_cannot_overadmit_one_shared_slot(self):
         self.api()
         ctx = multiprocessing.get_context("spawn")

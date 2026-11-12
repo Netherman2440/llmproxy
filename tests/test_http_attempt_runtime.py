@@ -75,7 +75,17 @@ class TestHttpAttemptRuntime(LLMProxyAppTestCase):
             await response.write(('data: {"private":"' + marker + '",BROKEN}\n\n').encode())
             await response.write(b'data: [DONE]\n\n')
             return response
-        with patch.object(mockbackend, '_chat_stream', malformed), self.assertLogs(level='ERROR') as captured:
+        finalized = asyncio.Event()
+        original_abandon = attempts.abandon
+
+        async def observed_abandon(*args, **kwargs):
+            try:
+                return await original_abandon(*args, **kwargs)
+            finally:
+                finalized.set()
+
+        with patch.object(mockbackend, '_chat_stream', malformed), \
+                patch.object(attempts, 'abandon', observed_abandon), self.assertLogs(level='ERROR') as captured:
             response = await self.client.post('/v1/chat/completions', headers=self.AUTH,
                 json={'model': 'mymodel', 'stream': True, 'messages': [{'role': 'user', 'content': 'hello'}]})
             try:
@@ -83,6 +93,9 @@ class TestHttpAttemptRuntime(LLMProxyAppTestCase):
                     await response.read()
             finally:
                 response.close()
+        # Transport abort can arrive before the handler's durable-finally write.
+        # Observe real completion rather than racing a still-prepared obligation.
+        await asyncio.wait_for(finalized.wait(), 3)
         self.assertNotIn(marker, '\n'.join(captured.output))
         db = await self.journal()
         try:
