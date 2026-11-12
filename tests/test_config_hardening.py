@@ -93,6 +93,17 @@ class TestConfigHardening(unittest.TestCase):
         config.validate({"admission": {"mode": "shared", "scope": "audit-test",
             "lease_ttl": 0.4, "io_timeout": 0.03}})
 
+    def test_native_tls_cannot_silently_fall_back_to_cleartext(self):
+        for options in ({'cert': 'certificate-reference'}, {'key': 'key-reference'},
+                {'cert': '', 'key': ''}, {'cert': None, 'key': 'key-reference'},
+                {'cert': 'certificate-reference', 'key': ''}, {'cert': 1, 'key': True}):
+            with self.subTest(fields=list(options)):
+                self.reject(options)
+
+    def test_explicit_http_or_complete_native_tls_pair_remain_valid(self):
+        config.validate({'host': '127.0.0.1'})
+        config.validate({'cert': '/protected/cert.pem', 'key': '/protected/key.pem'})
+
     def test_backend_urls_have_supported_scheme_host_and_no_credentials(self):
         for value in (None, 12, "", " ", "inference:8000", "ftp://host", "file:///etc/passwd",
                       "http:///v1", "http://user:password@host", "https://host/#fragment",

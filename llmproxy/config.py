@@ -97,6 +97,11 @@ def _global_fields(cfg):
     for key in ("db", "metrics", "rate_limit", "backends", "budget", "files", "provenance", "parsing", "admission", "realtime"):
         if key in cfg:
             _table(cfg[key], key)
+    if 'cert' in cfg or 'key' in cfg:
+        if 'cert' not in cfg or 'key' not in cfg:
+            raise ConfigError('Native TLS requires both cert and key references')
+        _text(cfg['cert'], 'cert')
+        _text(cfg['key'], 'key')
     _admission_fields(cfg)
     _realtime_fields(cfg)
     parsing = cfg.get("parsing", {})
