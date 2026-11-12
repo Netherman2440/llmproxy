@@ -2,6 +2,7 @@ import asyncio
 import decimal
 import json
 import math
+import re
 
 import aiohttp.web
 from aiohttp.http_exceptions import LineTooLong
@@ -29,6 +30,43 @@ async def readuntil(stream, separator: bytes = b"\n", *,
         raise ValueError("Backend stream frame exceeds the byte limit") from None
 
 
+# Atomic CRLF prevents regex backtracking from counting one CRLF as two
+# separate line endings. Each SSE empty line consists of two line endings.
+_SSE_END = re.compile(rb'(?>\r\n|\r|\n){2}')
+
+
+async def sse_blocks(stream, *, max_bytes=SSE_FRAME_MAX_BYTES):
+    """Bounded, byte-preserving SSE events across LF/CRLF/CR fragments."""
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError('A positive integer frame budget is required')
+    buffer, scan_from, eof = bytearray(), 0, False
+    while True:
+        match = _SSE_END.search(buffer, scan_from)
+        # A final CR might be the first half of a CRLF in the next read.
+        if match is not None and (eof or not (match.end() == len(buffer) and buffer[-1] == 13)):
+            end = match.end()
+            if end > max_bytes:
+                raise ValueError('Backend stream frame exceeds the byte limit')
+            frame = bytes(buffer[:end])
+            del buffer[:end]
+            scan_from = 0
+            yield frame
+            continue
+        if len(buffer) > max_bytes:
+            raise ValueError('Backend stream frame exceeds the byte limit')
+        if eof:
+            if buffer:
+                yield bytes(buffer)  # preserve legacy EOF-tail handling
+            return
+        # A delimiter has at most4bytes; only its last3 can cross a read.
+        scan_from = max(0, len(buffer) - 3)
+        chunk = await stream.read(8192)
+        if chunk:
+            buffer.extend(chunk)
+        else:
+            eof = True
+
+
 def parse_sse_event(raw_event):
     """Decode the JSON from the ``data:`` field(s) of one SSE block (bytes up to
     the blank line). Returns the decoded object, or None for blocks with no JSON
@@ -37,8 +75,7 @@ def parse_sse_event(raw_event):
     OpenAI-Responses usage accumulators (both send named ``event:``/``data:``
     blocks, unlike chat's plain ``data: {json}``)."""
     data_lines = []
-    for line in raw_event.split(b"\n"):
-        line = line.rstrip(b"\r")
+    for line in re.split(rb'\r\n|\r|\n', raw_event):
         if line.startswith(b"data:"):
             payload = line[len(b"data:"):]
             if payload.startswith(b" "):
@@ -163,8 +200,10 @@ async def stream_through(f_req, b_res, on_chunk, extra_headers=None, *, before_c
     except (OSError, TimeoutError) as error:
         on_disconnect(error)
 
+    blocks = sse_blocks(b_res.content)
+
     async def read_block():
-        return await readuntil(b_res.content, b"\n\n")
+        return await anext(blocks, b'')
 
     held, held_bytes = [], 0
 

@@ -134,7 +134,7 @@ class TestBoundedStreamResponse(unittest.IsolatedAsyncioTestCase):
         seen, writes, aborts = [], [], []
         never = asyncio.Event()
 
-        async def readuntil(separator, *, max_size):
+        async def read(size):
             return next(chunks)
 
         async def prepare(response, request):
@@ -153,7 +153,7 @@ class TestBoundedStreamResponse(unittest.IsolatedAsyncioTestCase):
         request = Request(request_id="synthetic-request-id")
         request.transport = types.SimpleNamespace(abort=lambda: aborts.append(True))
         backend = types.SimpleNamespace(headers={"Content-Type": "text/event-stream"},
-            content=types.SimpleNamespace(readuntil=readuntil))
+            content=types.SimpleNamespace(read=read))
         with mock.patch.object(aiohttp.web.StreamResponse, "prepare", new=prepare), \
                 mock.patch.object(aiohttp.web.StreamResponse, "write", new=write), \
                 mock.patch.object(aiohttp.web.StreamResponse, "write_eof", new=eof):

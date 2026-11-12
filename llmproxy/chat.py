@@ -12,27 +12,27 @@ from . import (
 
 
 class _ChatStreamUsage:
-    """on_chunk accumulator for OpenAI chat streams: keep the last non-[DONE]
-    SSE block and expose its ``usage`` object. OpenAI reports usage in the final
-    chunk when ``stream_options.include_usage`` is set, so keeping the last block
-    also captures a usage chunk that arrives separately after ``finish_reason``.
+    """Keep authoritative usage events, never positional comments/keepalives.
+
+    Parsing is shared with Messages/Responses for valid SSE line endings and
+    multi-line data. Nullable normal chunks do not erase the final proof.
     """
 
     def __init__(self):
-        self._last = b""
+        self._usage = None
 
     def __call__(self, chunk):
-        if chunk != b"data: [DONE]\n\n":
-            self._last = chunk
+        event = streaming.parse_sse_event(chunk)
+        if isinstance(event, dict) and event.get('usage') is not None:
+            if not isinstance(event['usage'], dict):
+                raise ValueError('Invalid backend stream usage')
+            self._usage = event['usage']
 
     def usage(self):
-        _, _, raw = self._last.partition(b" ")
-        try:
-            data = json.loads(raw, parse_float=decimal.Decimal)
-        except json.JSONDecodeError:
-            logging.error("Malformed backend stream usage: body_len=%d", len(raw))
-            raise
-        return data["usage"]
+        if self._usage is None:
+            logging.error('Missing valid backend stream usage')
+            raise ValueError('Missing backend stream usage')
+        return self._usage
 
 
 def force_include_usage(body):

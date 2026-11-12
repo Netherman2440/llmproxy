@@ -42,6 +42,12 @@ class TestHttpAttemptRuntime(LLMProxyAppTestCase):
         await self._confirmed_finance_failure('/v1/completions')
 
     async def _confirmed_finance_failure(self, path):
+        # This case measures explicit manual recovery, not a race against the
+        # real background reconciler already running on app startup. Keep the
+        # financial/exactly-once assertions, and own the worker deterministically.
+        worker = self.app['delivery_recovery_task']
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
         with patch.object(SqliteDatabase, 'attempt_settle', side_effect=RuntimeError('injected finance fault')):
             response = await self.client.post(path, headers=self.AUTH,
                 json={'model': 'mymodel', 'stream': True, 'messages': [{'role': 'user', 'content': 'hello'}]})
