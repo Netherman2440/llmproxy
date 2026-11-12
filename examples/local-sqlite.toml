@@ -1,0 +1,19 @@
+# Local single-process onboarding, not a production deployment.
+# Override LLMPROXY_DB_URI with an absolute private-state path in both CLI/server.
+log_level = "INFO"
+host = "127.0.0.1"
+port = 8080
+timeout_connect = 5
+timeout_read = 60
+http_origin = "http://127.0.0.1:8080"
+
+[db]
+uri = "sqlite://local-state/db.sqlite"
+
+# Disabled, not a publicly readable metrics endpoint.
+[metrics]
+enabled = false
+
+# Add explicitly authorized backends from llmproxy/config.toml.
+# An empty model list does not contact a model or incur usage charges.
+[backends]

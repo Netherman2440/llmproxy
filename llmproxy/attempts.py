@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from .accounting import AccountingConflict, _call, _text, clean_owner, encode
 from .usage import timestamp
 
-ENDPOINTS = frozenset(('/v1/chat/completions', '/v1/messages', '/v1/responses'))
+ENDPOINTS = frozenset(('/v1/chat/completions', '/v1/completions', '/v1/messages', '/v1/responses'))
 
 
 def normalize(binding):

@@ -21,8 +21,8 @@ class TestHttpAttemptRuntime(LLMProxyAppTestCase):
         db = await SqliteDatabase.create('sqlite://' + self.db_path)
         return db
 
-    async def test_all_three_frontends_settle_durable_attempts_before_success(self):
-        for path in ('/v1/chat/completions', '/v1/messages', '/v1/responses'):
+    async def test_all_frontends_and_legacy_alias_settle_durable_attempts_before_success(self):
+        for path in ('/v1/chat/completions', '/v1/completions', '/v1/messages', '/v1/responses'):
             response = await self.client.post(path, headers=self.AUTH,
                 json={'model': 'mymodel', 'stream': True, 'messages': [{'role': 'user', 'content': 'hello'}]})
             self.assertEqual(response.status, 200)
@@ -30,14 +30,20 @@ class TestHttpAttemptRuntime(LLMProxyAppTestCase):
         db = await self.journal()
         try:
             rows = await db.db.execute_fetchall('SELECT state FROM http_attempt')
-            self.assertEqual([row['state'] for row in rows], ['billed'] * 3)
+            self.assertEqual([row['state'] for row in rows], ['billed'] * 4)
         finally:
             await db.close()
-        self.assertEqual(len(await self.get_events()), 6)
+        self.assertEqual(len(await self.get_events()), 8)
 
     async def test_confirmed_finance_failure_recovers_without_browser_or_second_backend_call(self):
+        await self._confirmed_finance_failure('/v1/chat/completions')
+
+    async def test_legacy_alias_finance_failure_is_durable_not_free_success(self):
+        await self._confirmed_finance_failure('/v1/completions')
+
+    async def _confirmed_finance_failure(self, path):
         with patch.object(SqliteDatabase, 'attempt_settle', side_effect=RuntimeError('injected finance fault')):
-            response = await self.client.post('/v1/chat/completions', headers=self.AUTH,
+            response = await self.client.post(path, headers=self.AUTH,
                 json={'model': 'mymodel', 'stream': True, 'messages': [{'role': 'user', 'content': 'hello'}]})
             try:
                 with self.assertRaises(aiohttp.ClientPayloadError):

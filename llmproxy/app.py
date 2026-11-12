@@ -253,6 +253,10 @@ def main():
         print("Failed loading config:", e, file=sys.stderr)
         sys.exit(1)
 
+    if args.create_config:
+        # Explicit preparation command, never bind a listener or touch billing.
+        return
+
     log_fmt = "%(asctime)s %(levelname)s %(message)s"
     logging.basicConfig(format=log_fmt, level=cfg["log_level"])
 

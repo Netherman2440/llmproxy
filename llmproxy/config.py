@@ -359,7 +359,8 @@ def load(path=None, create=False):
                 config = importlib.resources.files("llmproxy") \
                     .joinpath("config.toml").read_bytes()
                 try:
-                    with open(p, "wb") as f:
+                    descriptor = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(descriptor, "wb") as f:
                         f.write(config)
                     print("Created default config file", file=sys.stderr)
                 except OSError as e:

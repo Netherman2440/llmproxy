@@ -2,6 +2,8 @@ import argparse
 import asyncio
 import datetime
 import hashlib
+import os
+from pathlib import Path
 import secrets
 import sys
 
@@ -35,27 +37,48 @@ async def command_user_create(args):
     secret = secrets.token_urlsafe(64)
     digest = hashlib.sha256(secret.encode()).hexdigest()
 
+    output = getattr(args, 'secret_file', None)
     try:
+        if output is not None:
+            # Credential reference exists before DB write, including a lost DB
+            # reply. Never overwrite another key or delete an uncertain grant.
+            descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, 'w') as stream:
+                stream.write(secret + '\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            if os.name == 'posix':
+                directory = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
         await db.user_create(digest, args.expires, args.comment)
-    except DatabaseError as e:
-        print("Database error:", e, file=sys.stderr)
-        sys.exit(1)
-
-    await db.close()
+    except (DatabaseError, OSError) as error:
+        print('User creation failed; retained credential reference if created; category='
+            + type(error).__name__, file=sys.stderr)
+        raise SystemExit(1) from None
+    finally:
+        await db.close()
 
     print("User created", file=sys.stderr)
     print("Expires:", args.expires or "never", file=sys.stderr)
     print("Comment:", args.comment or "-", file=sys.stderr)
     print("Hash:", digest[:12])
-    print("Plain API key:", end=" ", file=sys.stderr)
-    sys.stderr.flush()
-    print(secret)
+    if output is not None:
+        print('Credential stored in protected file (no plaintext output)', file=sys.stderr)
+    else:
+        print("Plain API key (prefer --secret-file for protected output):", end=" ", file=sys.stderr)
+        sys.stderr.flush()
+        print(secret)
 
 parser_user_create = subparsers_user.add_parser("create")
 parser_user_create.add_argument("-e", "--expires", type=isodatetime,
     help="expiration time in ISO 8601 format")
 parser_user_create.add_argument("-t", "--comment",
     help="arbitrary text associated with the key")
+parser_user_create.add_argument('--secret-file', type=Path,
+    help='create-only private credential file; avoids printing the bearer value')
 parser_user_create.set_defaults(func=command_user_create)
 
 

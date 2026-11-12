@@ -4,22 +4,45 @@ HTTP proxy that sits between end users and LLM servers and bills them per token.
 
 ## Requirements
 
-* Python >=3.11
-* Python packages from [pyproject.toml](pyproject.toml) (dependencies)
+* Python3.12 (>=3.12,<3.13) z działającym `venv`/`ensurepip`
+  (na Debian/Ubuntu także pakiet `python3.12-venv`); alternatywa: `uv venv --seed --python 3.12 .venv`.
+* Zależności z hash-pinned [requirements-runtime.lock](requirements-runtime.lock).
+  [pyproject.toml](pyproject.toml) określa obsługiwany zakres, lock konkretny build.
 
 ## Quick start
 
-```sh
-python3 -m venv venv
-source venv/bin/activate
+Dla istniejącego checkoutu, bez kont produkcyjnych ani kontaktu z modelem:
 
-python3 -m llmproxy
+```sh
+python3.12 -m venv .venv
+. .venv/bin/activate
+python -m pip install --require-hashes -r requirements-runtime.lock -r requirements-build.lock
+python -m pip install --no-build-isolation --no-deps .
+
+umask 077
+mkdir -p "$HOME/.local/state"
+state="$(mktemp -d "$HOME/.local/state/llmproxy-local.XXXXXXXX")"
+cp examples/local-sqlite.toml "$state/config.toml"
+export LLMPROXY_DB_URI="sqlite://$state/db.sqlite"
+python -m llmproxy.ctl -c "$state/config.toml" user create --secret-file "$state/api-key" \
+  --expires "$(python -c 'import datetime; print((datetime.datetime.now(datetime.UTC)+datetime.timedelta(days=1)).isoformat())')"
+printf 'Private state reference: %s\\n' "$state"
+python -m llmproxy -c "$state/config.toml"
 ```
 
-The SQLite schema is created automatically on first run (and by
-`llmproxyctl`). You can pre-create it with `sqlite3 db.sqlite <
-llmproxy/schema.sql`, but that step is optional; the schema script is
-idempotent.
+Profil nasłuchuje tylko127.0.0.1:8080, bez backendów i bez publicznych metrics.
+Klucz jest w nowym pliku0600, nie w argv, URL ani terminalu. Instrukcja obejmuje
+instalację pakietu i CLI, prywatny config, automatyczny schema upgrade i utworzenie
+klucza. Szczegóły, uwierzytelniony test `/v1/models` bez naliczania opłat,
+restart i granice profilu: [local quickstart](docs/local-quickstart.md).
+
+`python -m llmproxy --create-config -c /private/path/config.toml` tworzy pełny
+szablon0600 i **kończy działanie**, nie uruchamia listenera ani bazy. Domyślny
+szablon wymaga świadomego ustawienia bind/backendów/DB; profil powyżej to osobny
+minimalny przykład. SQLite tworzy i migruje program/CLI: nie odtwarzaj nowego
+journalu samym historycznym `schema.sql`. Docker Compose wymaga osobno prywatnego
+zweryfikowanego image@sha256, prawidłowych uprawnień UID10001 i trwałego volume;
+nie jest zamiennikiem tej instrukcji ani deklaracją production-ready.
 
 ## Configuration
 

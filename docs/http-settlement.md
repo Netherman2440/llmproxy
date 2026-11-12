@@ -1,6 +1,7 @@
 # Rozliczenia HTTP/SSE i nieznane usage
 
-Dotyczy Chat, Messages i Responses, także odpowiedzi JSON. Audio receipt-v1
+Dotyczy `/v1/chat/completions`, legacy alias `/v1/completions`, `/v1/messages`
+i `/v1/responses`, także odpowiedzi JSON. Audio receipt-v1
 pozostaje oddzielnym protokołem z integer samples/16000; ten journal nie
 przelicza tokenów na czas ani nie zmienia taryf.
 
