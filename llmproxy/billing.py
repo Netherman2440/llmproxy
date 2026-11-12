@@ -4,6 +4,7 @@ from decimal import Decimal
 import aiohttp.web
 
 from . import attempts
+from .products import product as product  # canonical identity, re-exported for handlers
 from .db import DatabaseError, get_db
 
 
@@ -21,9 +22,12 @@ def validate_resources(resources):
     """Last common boundary before any finance write, including legacy routes."""
     if type(resources) is not dict or not resources:
         raise ValueError('Invalid backend resources')
-    for product, quantity in resources.items():
-        if not isinstance(product, str) or not product or type(quantity) not in (int, float, Decimal):
+    for product_key, quantity in resources.items():
+        if (not isinstance(product_key, str) or not product_key
+                or type(quantity) not in (int, float, Decimal)):
             raise ValueError('Invalid backend resource quantity')
+        if product_key != product_key.lower():
+            raise ValueError('Non-canonical billing product identity')
         number = Decimal(str(quantity))
         if not number.is_finite() or number < 0:
             raise ValueError('Invalid backend resource quantity')

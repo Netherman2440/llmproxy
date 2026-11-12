@@ -9,6 +9,7 @@ import yarl
 from . import (
     auth, billing, conversion_id, delivery, errors, metrics, provenance, proxy, streaming,
 )
+from .products import product
 
 
 # Marker Datalab-compat path (PDF -> Markdown). Not path-preserving:
@@ -119,7 +120,7 @@ def billing_product(f_req, b_name, b_cfg):
             "File-convert backend %s has no device to bill: request_id=%s",
             b_name, f_req["request_id"])
         raise aiohttp.web.HTTPInternalServerError()
-    return "%s/%s/conversion" % (b_name, device)
+    return product(b_name, device, "conversion")
 
 
 def page_count_from_response(data):

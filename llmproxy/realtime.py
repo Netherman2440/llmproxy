@@ -27,6 +27,7 @@ import aiohttp.web
 import yarl
 
 from . import auth, billing, errors, metrics, proxy, provenance, ratelimit
+from .products import product
 from .session_auth import watch
 
 COMPLETED = "conversation.item.input_audio_transcription.completed"
@@ -227,7 +228,7 @@ async def realtime(f_req):
                     # Bill FIRST, preserving legacy fractional quantity/product.
                     # No invalid completed frame may escape as a free result.
                     await billing.record(f_req, user, {
-                        '%s/%s/transcription' % (b_name, b_cfg['device']):
+                        product(b_name, b_cfg['device'], 'transcription'):
                             decimal.Decimal(str(seconds)),
                     })
                     app.logger.info('Client used: %.3f s of %s (realtime)',

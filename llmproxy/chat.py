@@ -9,6 +9,7 @@ from . import (
     auth, billing, budget, decision_adapters, decision_openai, errors,
     metrics, provenance, proxy, streaming,
 )
+from .products import product
 
 
 class _ChatStreamUsage:
@@ -71,8 +72,8 @@ async def _chat(f_req):
             if is_stream:
                 usage = usage_acc.usage()
             await billing.record(f_req, user, {
-                "%s/%s/prompt" % (b_name, b_cfg["device"]): usage["prompt_tokens"],
-                "%s/%s/completion" % (b_name, b_cfg["device"]): usage["completion_tokens"],
+                product(b_name, b_cfg["device"], "prompt"): usage["prompt_tokens"],
+                product(b_name, b_cfg["device"], "completion"): usage["completion_tokens"],
             })
 
         if is_stream:

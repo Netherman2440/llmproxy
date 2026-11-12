@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 from .accounting import AccountingUnavailable as AccountingUnavailable
 from .accounting import AccountingConflict, _call, _text, clean_owner, encode
+from .products import product as canonical_product
 from .usage import ID, timestamp
 
 
@@ -40,7 +41,7 @@ def fingerprint(binding):
 
 
 def product(binding):
-    return (binding['backend_alias'] + '/' + binding['device'] + '/conversion').lower()
+    return canonical_product(binding['backend_alias'], binding['device'], 'conversion')
 
 
 async def prepare_delivery(db, binding, pages):

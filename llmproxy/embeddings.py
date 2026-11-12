@@ -4,6 +4,7 @@ import json
 import aiohttp
 
 from . import auth, billing, metrics, proxy
+from .products import product
 
 
 # Frontend related variables are prefixed with f_.
@@ -36,8 +37,7 @@ async def embeddings(f_req):
         f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
 
         await billing.record(f_req, user, {
-            "%s/%s/embedding" % (b_name, b_cfg["device"]):
-                tokens,
+            product(b_name, b_cfg["device"], "embedding"): tokens,
         })
 
         app.logger.info("Client used: P:%d C:%d tokens of %s",

@@ -8,6 +8,7 @@ from decimal import Decimal
 from urllib.parse import urlsplit
 
 from .accounting import AccountingConflict, _call, _text, clean_owner, encode
+from .products import product
 from .usage import timestamp
 
 ENDPOINTS = frozenset(('/v1/chat/completions', '/v1/completions', '/v1/messages', '/v1/responses'))
@@ -38,8 +39,9 @@ def fingerprint(value):
 
 
 def proof(binding, resources):
-    prefix = binding['backend_alias'] + '/' + binding['device']
-    if type(resources) is not dict or set(resources) != {prefix + '/prompt', prefix + '/completion'}:
+    expected = {product(binding['backend_alias'], binding['device'], 'prompt'),
+        product(binding['backend_alias'], binding['device'], 'completion')}
+    if type(resources) is not dict or set(resources) != expected:
         raise ValueError('Invalid HTTP usage products')
     result = {}
     for key, value in resources.items():

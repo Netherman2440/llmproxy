@@ -20,6 +20,7 @@ import aiohttp
 import aiohttp.web
 
 from . import auth, billing, budget, metrics, provenance, proxy, streaming
+from .products import product
 
 
 # Terminal Responses events carrying final usage. `response.incomplete`
@@ -119,8 +120,8 @@ class _ResponsesStreamUsage:
 
 def _bill_map(billed, b_name, device):
     return {
-        "%s/%s/prompt" % (b_name, device): billed["prompt_tokens"],
-        "%s/%s/completion" % (b_name, device): billed["completion_tokens"],
+        product(b_name, device, "prompt"): billed["prompt_tokens"],
+        product(b_name, device, "completion"): billed["completion_tokens"],
     }
 
 

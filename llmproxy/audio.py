@@ -5,6 +5,7 @@ import math
 import aiohttp
 
 from . import auth, billing, metrics, provenance, proxy
+from .products import product
 
 
 def force_verbose(body):
@@ -54,7 +55,7 @@ async def transcriptions(f_req):
         f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
 
         await billing.record(f_req, user, {
-            "%s/%s/transcription" % (b_name, b_cfg["device"]): duration,
+            product(b_name, b_cfg["device"], "transcription"): duration,
         })
 
         app.logger.info("Client used: %d s of %s", duration, b_name)

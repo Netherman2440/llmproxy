@@ -5,6 +5,7 @@ import json
 import aiohttp.web
 
 from . import auth, billing, config, decision_adapters, errors, metrics, proxy
+from .products import product
 
 
 def _reject_constant(value):
@@ -77,8 +78,8 @@ async def respond(request, user, response, alias, backend, prepared, *, render=N
     except (ValueError, TypeError, OverflowError, RecursionError) as exc:
         raise _bad_gateway(request) from exc
     await billing.record(request, user, {
-        "%s/%s/prompt" % (alias, backend["device"]): usage.input_tokens,
-        "%s/%s/completion" % (alias, backend["device"]): usage.output_tokens,
+        product(alias, backend["device"], "prompt"): usage.input_tokens,
+        product(alias, backend["device"], "completion"): usage.output_tokens,
     })
     try:
         metrics.observe_text_tokens(alias, usage.input_tokens, usage.output_tokens)

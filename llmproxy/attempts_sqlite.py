@@ -1,5 +1,6 @@
 """Atomic token finance set and stable HTTP attempt marker under SQLite FULL."""
 from .accounting import AccountingConflict, decode, encode
+from .products import product as canonical_product
 
 
 class SqliteAttempts:
@@ -61,9 +62,10 @@ class SqliteAttempts:
                 raise AccountingConflict('HTTP attempt requires authoritative usage proof')
             binding, resources = decode(row['binding']), decode(row['resources'])
             inserted = row['state'] != 'billed'
-            prefix = binding['backend_alias'] + '/' + binding['device']
             # Preserve legacy prompt-before-completion financial ordering.
-            for product in (prefix + '/prompt', prefix + '/completion'):
+            products = (canonical_product(binding['backend_alias'], binding['device'], 'prompt'),
+                canonical_product(binding['backend_alias'], binding['device'], 'completion'))
+            for product in products:
                 quantity = resources[product]
                 expected = (row['observed_at'], binding['owner']['id'], product,
                     quantity, str(quantity), binding['request_id'])

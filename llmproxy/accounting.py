@@ -4,6 +4,7 @@ import hashlib
 import json
 from urllib.parse import urlsplit
 
+from .products import product as canonical_product
 from .usage import ID, parse_receipt, timestamp
 
 
@@ -101,7 +102,7 @@ def binding_hash(value):
 
 
 def product(binding):
-    return (binding['backend_alias'] + '/' + binding['device'] + '/transcription').lower()
+    return canonical_product(binding['backend_alias'], binding['device'], 'transcription')
 
 
 async def _call(awaitable):
