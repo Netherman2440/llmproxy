@@ -21,21 +21,29 @@ async def embeddings(f_req):
             request_id=f_req["request_id"])
 
         body = await proxy.read_response(f_req, b_res)
-        data = json.loads(body, parse_float=decimal.Decimal)
+        try:
+            data = json.loads(body, parse_float=decimal.Decimal)
+            usage = data.get('usage') if isinstance(data, dict) else None
+            if not isinstance(usage, dict):
+                raise ValueError('Missing embedding usage')
+            tokens = billing.token_count(usage.get('prompt_tokens'))
+        except (ValueError, TypeError):
+            app.logger.error('Embedding backend usage invalid: backend=%s request_id=%s',
+                b_name, f_req['request_id'])
+            raise aiohttp.web.HTTPBadGateway(text='Embedding backend returned invalid usage') from None
         f_hdrs = {"Content-Type":
             b_res.headers.get("Content-Type", "application/octet-stream")}
         f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
-        usage = data["usage"]
 
         await billing.record(f_req, user, {
             "%s/%s/embedding" % (b_name, b_cfg["device"]):
-                usage["prompt_tokens"],
+                tokens,
         })
 
         app.logger.info("Client used: P:%d C:%d tokens of %s",
-            usage["prompt_tokens"], 0, b_name)
+            tokens, 0, b_name)
 
         metrics.TOKENS_TOTAL.labels(b_name, "embedding").inc(
-            usage["prompt_tokens"])
+            tokens)
 
         return f_res

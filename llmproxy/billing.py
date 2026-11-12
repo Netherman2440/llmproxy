@@ -1,9 +1,32 @@
 import datetime
+from decimal import Decimal
 
 import aiohttp.web
 
 from . import attempts
 from .db import DatabaseError, get_db
+
+
+def token_count(value):
+    """Backend token proof: exact nonnegative integer, never bool/coerced text."""
+    if type(value) not in (int, Decimal):
+        raise ValueError('Invalid backend token quantity')
+    number = Decimal(value)
+    if not number.is_finite() or not 0 <= number < 2**53 or number != int(number):
+        raise ValueError('Invalid backend token quantity')
+    return int(number)
+
+
+def validate_resources(resources):
+    """Last common boundary before any finance write, including legacy routes."""
+    if type(resources) is not dict or not resources:
+        raise ValueError('Invalid backend resources')
+    for product, quantity in resources.items():
+        if not isinstance(product, str) or not product or type(quantity) not in (int, float, Decimal):
+            raise ValueError('Invalid backend resource quantity')
+        number = Decimal(str(quantity))
+        if not number.is_finite() or number < 0:
+            raise ValueError('Invalid backend resource quantity')
 
 
 async def record(f_req, user, resources):
@@ -15,6 +38,10 @@ async def record(f_req, user, resources):
     GracefulExit policy. No path interprets a storage fault as zero usage.
     """
     app = f_req.app
+    try:
+        validate_resources(resources)
+    except ValueError:
+        raise aiohttp.web.HTTPBadGateway(text='Backend returned invalid usage') from None
 
     db = await get_db(app["config"]["db"]["uri"], f_req)
     try:
