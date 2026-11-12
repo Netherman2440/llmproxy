@@ -48,12 +48,13 @@ timeout_read = 60  # response timeout (global default sock_read; override per-ba
 # This value will be sent in the Access-Control-Allow-Origin response header.
 http_origin = "*"
 
-# Rate limiting (Phase 1: rpm + concurrency, in-memory).
-#
-# Global defaults — applied when a backend has no per-model limit. 0 = unlimited
-# (exempt); absent/NULL = fall through to the next precedence level. A global
-# limit buckets per USER (so "rpm = 60" means 60 rpm per user across all
-# models, not one hard cap shared by everyone).
+# Rate limiting: rpm + concurrency PER API KEY, not person/account/namespace.
+# Global policy applies when a backend has no per-model value. 0=unlimited;
+# absent falls through. Global60rpm means60 per credential across all models,
+# not one cap for the service or one billing account's multiple credentials.
+# Default mode is local/process; explicit admission.mode=shared coordinates
+# replicas in one scope, still per key. No account/daily-token policy fields.
+# See docs/admission-contract.md; unknown policy options fail validation.
 #[rate_limit]
 #rpm = 60
 #concurrency = 5
@@ -63,7 +64,7 @@ http_origin = "*"
 # Limits cannot be0/unlimited. Reload updates policy, never active owners.
 #[parsing]
 #concurrency = 4
-#per_user = 2
+#per_user = 2  # legacy option name: per API-key record, NOT billing owner
 #timeout = 30
 
 # Shared admission is explicit; local is the default single-process profile.
@@ -252,7 +253,7 @@ uri = "sqlite://db.sqlite"
 
 # Basal backend: native /v1/systemone; OpenAI /v1/decisions.
 # URL must not include /v1.
-# Limits below are proxy policy, per request / per user+model, not GPU limits.
+# Limits below are proxy policy, per request / per API key+model, not GPU limits.
 #[backends.basal-20-max]
 #type = "decision"
 #decision_adapter = "basal"  # wire protocol; default for existing decision configs
@@ -266,7 +267,7 @@ uri = "sqlite://db.sqlite"
 #health_path = "health"
 #[backends.basal-20-max.rate_limit]
 #rpm = 120
-#concurrency = 4  # per user+model in this process, not deployment-wide
+#concurrency = 4  # per key+model; process-local unless explicit shared admission
 #[backends.basal-20-max.decision_limits]
 #max_questions = 16
 #max_branches = 64

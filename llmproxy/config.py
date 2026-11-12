@@ -100,6 +100,8 @@ def _global_fields(cfg):
     _admission_fields(cfg)
     _realtime_fields(cfg)
     parsing = cfg.get("parsing", {})
+    if set(parsing) - {'concurrency', 'per_user', 'timeout'}:
+        raise ConfigError('parsing supports concurrency/per_user/timeout; per_user is credential-scoped')
     for key in ("concurrency", "per_user"):
         if key in parsing and (type(parsing[key]) is not int or parsing[key] <= 0):
             raise ConfigError("parsing.%s must be a positive integer" % key)
@@ -143,14 +145,14 @@ def _global_fields(cfg):
 
 
 def _validate_rate_limit(rl, prefix=""):
-    """Validate a ``[rate_limit]`` / ``[backends.X.rate_limit]`` block.
+    """Validate only supported credential-scoped rpm/concurrency policy.
 
-    Phase 1 checks ``rpm`` and ``concurrency`` only; phase 2 appends the two
-    ``*_tpd`` keys to the same loop. Each, if present, must be a non-negative
-    int (``type(v) is not int`` excludes ``bool``). 0 = unlimited, NULL/absent
-    = fall through. ``prefix`` labels backend errors.
+    No account grouping/daily-token option is silently accepted. Each value is
+    a non-negative integer;0=unlimited, absent=fall through to global policy.
     """
     _table(rl, prefix + "rate_limit")
+    if set(rl) - {'rpm', 'concurrency'}:
+        raise ConfigError('%srate_limit supports only credential-scoped rpm/concurrency' % prefix)
     for key in ("rpm", "concurrency"):
         if key in rl:
             value = rl[key]

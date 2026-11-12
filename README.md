@@ -53,6 +53,22 @@ The program will update the list of configured backends, the rate limits
 config file on SIGHUP. SIGHUP also flushes the authentication cache (see
 [Authentication](#authentication)).
 
+### Admission: per-key, nie per-account
+
+`rpm` i `concurrency` są limitami **rekordu API key**, nie człowieka, billing
+account, namespace ani organizacji. Dwa klucze jednego ownera mają osobne buckety.
+Globalny `[rate_limit]` to domyślna polityka per-key przez wszystkie modele,
+nie jeden globalny cap usługi. Modelowy override działa per-key+model;0wyłącza
+konkretny limit. Domyślny tryb local jest per-process; jawny shared koordynuje
+repliki w jednym scope, nadal per-key. `parsing.per_user` zachowuje historyczną
+nazwę, ale również oznacza credential ID. Tylko `parsing.concurrency` jest
+wspólnym parser capem, nie capem wszystkich GPU/backend requests.
+
+Nie ma account grouping ani dziennych token quotas; nieobsługiwane opcje tych
+tabel są odrzucane, nie udają ochrony konta. Nie zmieniono limitów biznesowych
+ani finansowego owner attribution. Szczegóły i migracja starej konfiguracji:
+[admission contract](docs/admission-contract.md).
+
 Each backend must define `type`, which decides the endpoints it is served on:
 
 | `type` | Endpoints |
@@ -271,8 +287,10 @@ directions and adds the gateway around them:
   (the real model the deployment expects), like on chat backends.
 * **Rate limits** — the usual `[backends.X.rate_limit]` semantics, scoped to
   the session: `rpm` bounds handshakes, `concurrency` bounds parallel
-  sessions per user+model and is held for the whole session (including the
-  short drain after the client disconnects).
+  sessions per API-key+model for model-level policy (global fallback spans
+  models for that credential) and is held for the whole session, including
+  the short drain after the client disconnects. Different keys of the same
+  billing owner are not aggregated; see [admission contract](docs/admission-contract.md).
 * **Errors** — handshake failures are ordinary HTTP errors (401/400/404/429).
   In session: a backend that rejects the proxy (close 1008, e.g. a wrong
   `token`) is a configuration fault — the client sees close 1011 and the
@@ -391,9 +409,10 @@ from deploy to Grafana is:
    - Choose your Prometheus datasource
    - The dashboard has 13 panels: request rate, error rate, status codes,
      active requests, latency percentiles, backend latency/errors, token
-     usage, plus per-user visibility — connected right now (user × model,
-     in-flight), request rate by user, and user × model activity over the
-     last 15 minutes
+     usage, plus per-credential visibility — connected right now (key × model,
+     in-flight), request rate by key, and key × model activity over the last
+     15minutes. The legacy Prometheus label `user` is a pseudonymous credential
+     label, not a person/account count; multiple keys of one person stay distinct.
 
 ### Prometheus scrape config (standalone, non-Operator)
 

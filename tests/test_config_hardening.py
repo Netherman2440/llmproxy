@@ -69,6 +69,16 @@ class TestConfigHardening(unittest.TestCase):
             with self.subTest(timeout=value):
                 self.reject({"parsing": {"timeout": value}})
 
+    def test_rate_limit_cannot_silently_claim_unsupported_account_or_daily_policy(self):
+        for options in ({'rpm': 1, 'scope': 'account'}, {'group_by_owner': True}, {'prompt_tpd': 100}):
+            with self.subTest(level='global', options=options):
+                self.reject({'rate_limit': options})
+            with self.subTest(level='model', options=options):
+                self.reject(self.backend(rate_limit=options))
+
+    def test_parser_cannot_silently_claim_account_grouping(self):
+        self.reject({'parsing': {'per_user': 1, 'scope': 'account'}})
+
     def test_shared_admission_profile_cannot_disable_or_misspell_its_safety_bounds(self):
         cases = ({"mode": "other"}, {"mode": True}, {"mode": "shared"},
             {"scope": ""}, {"scope": 123}, {"scope": "x" * 65},
