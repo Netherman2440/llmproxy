@@ -112,7 +112,7 @@ def is_terminal_event(chunk):
     if event.get('type') in ('message_delta', 'message_stop', 'response.completed',
             'response.incomplete', 'response.failed'):
         return True
-    return ('usage' in event or any(choice.get('finish_reason') is not None
+    return (event.get('usage') is not None or any(choice.get('finish_reason') is not None
         for choice in event.get('choices', []) if isinstance(choice, dict)))
 
 
@@ -167,12 +167,13 @@ async def stream_through(f_req, b_res, on_chunk, extra_headers=None, *, before_c
         return await readuntil(b_res.content, b"\n\n")
 
     held, held_bytes = [], 0
-    deferred = False
 
     async def write_block(chunk):
-        nonlocal deferred, held_bytes
-        if before_complete is not None and (deferred or is_terminal_event(chunk)):
-            deferred = True
+        nonlocal held_bytes
+        # A finished choice is not global stream completion. Hold only its
+        # terminal event; unrelated choices must keep streaming genuine deltas.
+        # Nullable OpenAI usage on normal deltas is not terminal proof.
+        if before_complete is not None and is_terminal_event(chunk):
             held_bytes += len(chunk)
             if held_bytes > 4 * SSE_FRAME_MAX_BYTES or len(held) >= 64:
                 raise ValueError('Deferred stream completion exceeds its budget')
