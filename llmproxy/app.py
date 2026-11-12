@@ -71,13 +71,24 @@ async def add_cors_headers(req, handler):
         res = await handler(req)
     except aiohttp.web.HTTPMethodNotAllowed as e:
         if e.method != "OPTIONS":
+            _apply_cors(req, e)
             raise
         res = aiohttp.web.Response()
+    except aiohttp.web.HTTPException as e:
+        # Raised API errors (401/400/429/502...) must stay readable by a
+        # configured browser origin. An HTTPException is itself a Response;
+        # decorate it and re-raise so error semantics are unchanged.
+        _apply_cors(req, e)
+        raise
+    _apply_cors(req, res)
+    return res
+
+
+def _apply_cors(req, res):
     res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
     res.headers["Access-Control-Expose-Headers"] = budget.EXPOSE_HEADERS
     if o := req.app["config"].get("http_origin"):
         res.headers["Access-Control-Allow-Origin"] = o
-    return res
 
 
 @aiohttp.web.middleware
@@ -239,6 +250,34 @@ async def create_app(cfg):
     return app
 
 
+ACCESS_LOG_FORMAT = "%a \"%r\" %s %Tfs"
+
+
+class RedactingAccessLogger(aiohttp.web.AccessLogger):
+    """Access-log request line without linkable conversion identifiers.
+
+    App-level logs already shorten job/backend ids (files._log_ids); this
+    keeps the standard access log from persisting the full poll target.
+    aiohttp's compiled format atoms bind the BASE AccessLogger._format_r,
+    so a plain subclass override would be silently ignored; redact here.
+    """
+
+    REDACTED_PREFIXES = ("/v1/files/convert/",)
+
+    def _format_line(self, request, response, time):
+        pairs = list(super()._format_line(request, response, time))
+        if request is None:
+            return pairs
+        target = request.path_qs
+        for prefix in self.REDACTED_PREFIXES:
+            if target.startswith(prefix):
+                line = (f"{request.method} {prefix}[REDACTED] "
+                    f"HTTP/{request.version.major}.{request.version.minor}")
+                return [(key, line if key == "first_request_line" else value)
+                    for key, value in pairs]
+        return pairs
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("-c", "--config", type=pathlib.Path)
 parser.add_argument("--create-config", action="store_true")
@@ -285,7 +324,8 @@ def main():
         host=app["config"]["host"],
         port=app["config"]["port"],
         ssl_context=ssl_ctx,
-        access_log_format="%a \"%r\" %s %Tfs",
+        access_log_format=ACCESS_LOG_FORMAT,
+        access_log_class=RedactingAccessLogger,
         loop=loop,
         # Billing-critical: on client disconnect the handler MUST run to
         # completion so the backend stream is drained and usage is billed.
