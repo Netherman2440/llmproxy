@@ -116,6 +116,7 @@ async def track_request(request, user, backend_alias, backend_cfg):
 
 
 async def recover_once(app):
+    from . import metrics
     from .db import get_db
     db = await get_db(app['config']['db']['uri'])
     try:
@@ -135,6 +136,7 @@ async def recover_once(app):
         if not healthy and app.get('http_attempt_recovery_healthy') is not False and hasattr(app, 'logger'):
             app.logger.error('Retained HTTP usage obligations require recovery or operator reconciliation')
         app['http_attempt_recovery_healthy'] = healthy
+        metrics.RECOVERY_HEALTHY.labels(journal='http_attempt').set(1 if healthy else 0)
         return count
     finally:
         await db.close()

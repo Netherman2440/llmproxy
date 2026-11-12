@@ -69,6 +69,7 @@ async def pending_deliveries(db, limit=100, after=None):
 
 
 async def recover_once(app, limit=100):
+    from . import metrics
     from .db import get_db
     db = await get_db(app['config']['db']['uri'])
     try:
@@ -84,26 +85,34 @@ async def recover_once(app, limit=100):
                 if intent['state'] == 'confirmed':
                     count += int(await settle_delivery(db, intent))
                 app['delivery_after'] = intent['key']
+        # Global bounded existence check, not only this fair page: retained
+        # conversion debt cannot disappear from health by moving the cursor.
+        healthy = not bool(await pending_deliveries(db, 1))
+        if not healthy and app.get('delivery_recovery_healthy') is not False and hasattr(app, 'logger'):
+            app.logger.error('Retained conversion obligations require recovery or operator reconciliation')
+        app['delivery_recovery_healthy'] = healthy
+        metrics.RECOVERY_HEALTHY.labels(journal='conversion_delivery').set(1 if healthy else 0)
         return count
     finally:
         await db.close()
 
 
 def setup(app):
-    from . import attempts
+    from . import attempts, metrics
 
     async def loop():
         while True:
             try:
                 await recover_once(app)
-                app['delivery_recovery_healthy'] = True
             except Exception as error:
                 app['delivery_recovery_healthy'] = False
+                metrics.RECOVERY_HEALTHY.labels(journal='conversion_delivery').set(0)
                 app.logger.error('Delivery recovery failed: category=%s', type(error).__name__)
             try:
                 await attempts.recover_once(app)
             except Exception as error:
                 app['http_attempt_recovery_healthy'] = False
+                metrics.RECOVERY_HEALTHY.labels(journal='http_attempt').set(0)
                 app.logger.error('HTTP attempt recovery failed: category=%s', type(error).__name__)
             await asyncio.sleep(5)
 

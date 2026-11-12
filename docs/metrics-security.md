@@ -32,6 +32,12 @@ authorization:
 ```
 
 Pełny przykład: [prometheus-scrape.yml](../examples/prometheus-scrape.yml).
+
+Gauge `llmproxy_recovery_healthy{journal}` (conversion_delivery/http_attempt)
+mówi, czy dany journal rozliczeń został wypuszczony z zaległości: 0 oznacza
+zatrzymane prepared/unknown/confirmed zobowiązania albo awarię workera —
+to dług operatora, nie zero usage; nie kasuje się wpisów, żeby uciszyć alert
+(przykład: [prometheus-alerts.yml](../examples/prometheus-alerts.yml)).
 Skonfiguruj TLS lub rzeczywiście prywatną sieć. Sam Bearer przez publiczne HTTP
 nie jest ochroną transportu. Nie umieszczaj sekretu w URL, command arguments,
 front-end assets, ConfigMap ani pliku scrape config śledzonym przez git.

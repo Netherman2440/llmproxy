@@ -92,6 +92,16 @@ ACTIVE_REQUESTS = prometheus_client.Gauge(
     registry=_REGISTRY,
 )
 
+# Recovery health per durable journal: 1 when a clean recovery pass left no
+# retained obligation, 0 while prepared/unknown/confirmed debt remains (or the
+# worker fails). Unresolved usage is never deleted to fake health.
+RECOVERY_HEALTHY = prometheus_client.Gauge(
+    "llmproxy_recovery_healthy",
+    "Durable obligation journals are drained after recovery.",
+    labelnames=("journal",),
+    registry=_REGISTRY,
+)
+
 # ---------------------------------------------------------------------------
 # Backend metrics
 # ---------------------------------------------------------------------------

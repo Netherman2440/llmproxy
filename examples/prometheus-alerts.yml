@@ -170,3 +170,22 @@ groups:
           description: |
             No requests have been received in the last 15 minutes.
             The proxy might be down or unreachable.
+
+      # -------------------------------------------------------------------
+      # Retained billing obligations (recovery debt)
+      # -------------------------------------------------------------------
+
+      - alert: LLMProxyRecoveryDebt
+        expr: |
+          min(llmproxy_recovery_healthy) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM proxy journal {{ $labels.journal }} retains unresolved obligations"
+          description: |
+            Recovery has been unable to drain the "{{ $labels.journal }}"
+            journal for 10 minutes. Retained prepared/unknown usage is
+            unbilled operator debt, not zero usage: inspect the journal CLI
+            or reconcile with the backend. Do not delete obligations to
+            silence this alert.
