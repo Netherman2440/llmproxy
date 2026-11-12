@@ -8,7 +8,7 @@ import aiohttp
 import aiohttp.test_utils
 
 from llmproxy.app import create_app, reload_config
-from llmproxy.db import get_db
+from llmproxy.db import SqliteDatabase, get_db
 
 from . import mockbackend
 from . import test_parser_admission as parser_tests
@@ -170,6 +170,59 @@ class TestSharedParserAdmission(LLMProxyAppTestCase):
                     self.assertEqual(response.status, 429)
         finally:
             await observer.close()
+
+    async def test_transient_renewal_timeout_does_not_discard_still_confirmed_ownership(self):
+        self.app['config']['admission'].update(lease_ttl=0.4, io_timeout=0.03)
+        original = SqliteDatabase.admission_renew
+        calls = 0
+
+        async def delayed_once(database, *args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await asyncio.sleep(0.06)  # exceeds unchanged30ms I/O, not lease TTL
+            return await original(database, *args)
+
+        observer = await get_db(self.app['config']['db']['uri'])
+        try:
+            with mock.patch.object(SqliteDatabase, 'admission_renew', delayed_once):
+                async with self.blocked_parser():
+                    initial = (await observer.db.execute_fetchall('SELECT min(expires_at) AS expiry FROM admission_lease'))[0]['expiry']
+                    self.assertIsNotNone(initial)
+                    async with asyncio.timeout(1):
+                        while True:
+                            expiry = (await observer.db.execute_fetchall('SELECT min(expires_at) AS expiry FROM admission_lease'))[0]['expiry']
+                            self.assertIsNotNone(expiry, 'Transient renewal discarded unexpired confirmed ownership')
+                            if expiry > initial + 0.4:
+                                break
+                            await asyncio.sleep(0.005)
+            self.assertGreater(calls, 2)
+        finally:
+            await observer.close()
+
+    async def test_repeated_renewal_timeouts_cannot_extend_unconfirmed_ownership(self):
+        self.app['config']['admission'].update(lease_ttl=0.4, io_timeout=0.03)
+        never = asyncio.Event()
+        calls = 0
+
+        async def unavailable(*args):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.06)
+            self.fail('Timed-out renewal unexpectedly completed')
+
+        async def body():
+            yield b'{"model":"mymodel","messages":['
+            await never.wait()
+
+        with mock.patch.object(SqliteDatabase, 'admission_renew', unavailable):
+            async with asyncio.timeout(1):
+                response = await self.client.post('/v1/chat/completions', data=body(),
+                    headers={'Authorization': 'Bearer mytoken', 'Content-Type': 'application/json'})
+                self.assertEqual(response.status, 503)
+                response.release()
+        self.assertLessEqual(calls, 10, 'Unbounded renewal retry')
+        self.assertEqual(await self.get_events(), [])
 
     async def test_lost_ownership_aborts_body_and_never_releases_the_replacement(self):
         self.app["config"]["admission"].update(lease_ttl=0.4, io_timeout=0.03)

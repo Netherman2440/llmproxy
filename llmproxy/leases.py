@@ -83,15 +83,20 @@ async def hold(request, limits):
         watchdog = asyncio.timeout_at(min(held.values()))
 
         async def renew():
+            delay = ttl / 4
             while True:
-                await asyncio.sleep(ttl / 4)
+                await asyncio.sleep(delay)
+                delay = ttl / 4
                 for name in held:
                     started = loop.time()
                     try:
                         renewed = await _call(request, database.admission_renew(name, owner, ttl), io_timeout)
                     except Exception:
-                        watchdog.reschedule(loop.time())
-                        return
+                        # Existing confirmed ownership remains valid only up to
+                        # the unchanged earliest deadline. Retry inside that
+                        # window; uncertain I/O NEVER extends the watchdog.
+                        delay = min(io_timeout, ttl / 16)
+                        break
                     if not renewed:
                         watchdog.reschedule(loop.time())
                         return

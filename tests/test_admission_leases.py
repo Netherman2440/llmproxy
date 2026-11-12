@@ -5,6 +5,7 @@ import sqlite3
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from llmproxy.db import DatabaseError, SqliteDatabase
 
@@ -63,6 +64,26 @@ class TestSqliteAdmissionLeases(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.db.admission_renew("bucket", "owner", 60))
         self.assertTrue(await self.db.admission_release("bucket", "owner"))
         self.assertFalse(await self.db.admission_renew("bucket", "owner", 30))
+
+    async def test_renewal_checks_database_time_when_update_executes_not_before_queue_delay(self):
+        self.assertTrue(await self.db.admission_acquire('delayed', 'old-owner', 1, 0.2))
+        native = self.db.db._execute
+        delayed_updates = []
+
+        async def dispatch(function, *args, **kwargs):
+            if args and isinstance(args[0], str) and args[0].lstrip().startswith('UPDATE admission_lease'):
+                delayed_updates.append(True)
+                await asyncio.sleep(0.25)
+            return await native(function, *args, **kwargs)
+
+        # Both implementations run the real SQLite statement after the same
+        # controlled queue delay. No result/clock/ownership is mocked.
+        with patch.object(self.db.db, '_execute', dispatch):
+            renewed = await self.db.admission_renew('delayed', 'old-owner', 1)
+        self.assertTrue(delayed_updates, 'Harness did not delay the actual SQL update')
+        self.assertFalse(renewed, 'A lease expired in the worker queue was resurrected')
+        self.assertTrue(await self.db.admission_acquire('delayed', 'replacement', 1, 30))
+        self.assertFalse(await self.db.admission_release('delayed', 'old-owner'))
 
     async def test_two_processes_cannot_overadmit_one_shared_slot(self):
         self.api()

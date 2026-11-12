@@ -122,9 +122,13 @@ class SqliteAdmission:
         validate_lease(bucket, owner, ttl)
         if ttl is None:
             raise ValueError("Lease lifetime is required")
-        now = await self._lease_now()
-        cursor = await self.db.execute("""UPDATE admission_lease SET expires_at=?
-            WHERE bucket=? AND owner=? AND expires_at>?""", (now + ttl, bucket, owner, now))
+        # SQLite's 'now' is stable for the whole statement and evaluated in
+        # the worker, not before queue/lock delays. Avoid two extra dispatches
+        # and never resurrect a lease that expired after a separate clock read.
+        cursor = await self.db.execute("""UPDATE admission_lease
+            SET expires_at=(julianday('now')-2440587.5)*86400.0+?
+            WHERE bucket=? AND owner=?
+                AND expires_at>(julianday('now')-2440587.5)*86400.0""", (ttl, bucket, owner))
         renewed = cursor.rowcount == 1
         await self.db.commit()
         return renewed

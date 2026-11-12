@@ -31,7 +31,9 @@ nie implikuje grouping admission. Nie zmieniono cen, taryf ani integer sample ST
   nie stanowi jednego deployment-wide limitu.
 - Jawny `admission.mode="shared"`: te same DB/scope/policy, database leases z
   finite TTL, renew/watchdog i server time. Brak DB/utrata lease nie przełącza
-  do local. Scope identyfikuje współpracującą usługę, **nie scala credentials
+  do local. Transient renew I/O może retry tylko w już potwierdzonym oknie:
+  niepewna próba nie wydłuża watchdog, false ownership odcina natychmiast;
+  acquire bez proof nadal failuje closed. Scope identyfikuje współpracującą usługę, **nie scala credentials
   tego samego account**. Restart repliki nie resetuje wspólnego okna RPM.
 - Parser-global cap obejmuje tylko parse/admission body, nie wszystkie trwające
   backendy. Nie ma jednego globalnego backend capu dla wszystkich credentials.
