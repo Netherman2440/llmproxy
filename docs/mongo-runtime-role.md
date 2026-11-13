@@ -67,7 +67,7 @@ Odbiór obejmuje prawdziwe auth lookups obu kolekcji, legacy/receipt/delivery
 financial writes, cold indexes, lease renew/release, idempotent retries i próbę
 niedozwolonego update/delete/drop/auth-write/foreign-DB/admin action.
 Samo wygenerowanie JSON nie jest dowodem działającego ACL. Dowody konkretnego
-isolated probe są w specs/001-post-audit-hardening/evidence/; realny deployment
+isolated probe generuje release pipeline CI (tests/integration/mongo_*_probe.py); realny deployment
 musi potwierdzić swoją wersję Mongo, role, TLS, storage i consumer/pricing.
 
 Mongo runtime user nie jest kontem do backup/restore, kasowania historii lub
