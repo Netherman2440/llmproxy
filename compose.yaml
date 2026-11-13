@@ -1,26 +1,25 @@
+# Local SQLite profile. Set LLMPROXY_IMAGE to the verified PRIVATE image@sha256 digest.
 services:
   llm-billing-proxy:
-    image: ghcr.io/comtegra/llmproxy:master  # set a specific version here
-    command: "-c /run/secrets/llm-billing-proxy-config.toml"
+    image: ${LLMPROXY_IMAGE:?Set a verified private image pinned by digest}
+    command: ["-c", "/run/secrets/llm-billing-proxy-config.toml"]
+    user: "10001:10001"
+    environment:
+      LLMPROXY_DB_URI: sqlite:///state/db.sqlite
+      # Reference only; never commit the credential or print rendered compose config.
+      LLMPROXY_METRICS_TOKEN: ${LLMPROXY_METRICS_TOKEN:-}
     secrets:
       - llm-billing-proxy-config.toml
-      #- llm-billing-proxy.crt  # TLS cert and key if needed, see also below
-      #- llm-billing-proxy.key
-    ports: [8080:8080]  # set HOST_PORT:CONTAINER_PORT here
-    #networks: [l3out]  # networks if needed
-    #expose: ["8080/tcp"]  # expose if using networks
-    #volumes:
-    #  - ./db.sqlite:/db.sqlite  # SQLite DB host path, if needed
+    ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      - llmproxy-state:/state
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+volumes:
+  llmproxy-state:
 
 secrets:
   llm-billing-proxy-config.toml:
-    file: ./secrets/llm-billing-proxy-config.toml  # set the location of your config file here
-  #llm-billing-proxy.crt:
-  #  file: ./secrets/llm-billing-proxy.crt
-  #llm-billing-proxy.key:
-  #  file: ./secrets/llm-billing-proxy.key
-
-#networks:
-#  l3out:
-#    external: true
-#    name: mynetwork1
+    file: ./secrets/llm-billing-proxy-config.toml

@@ -1,21 +1,18 @@
-"""Phase 1 rate limiting: in-memory ``rpm`` + ``concurrency``.
+"""Credential-scoped rpm/concurrency; not per billing account/person.
 
-Limits resolve by precedence from two levels — per-model
-(``[backends.X.rate_limit]``) then global (``[rate_limit]``). The resolver
-loops over a dimension tuple and walks a level list, so phase 2 extends it
-additively: prepend a per-user level and append ``prompt_tpd`` /
-``completion_tpd``. ``slot`` enforces whatever dimensions the resolver returns
-and needs no change when a dimension or level is added.
+Precedence: per-model [backends.X.rate_limit], then global [rate_limit].
+0=unlimited; absent falls through. Buckets use user['id'], the authenticated
+API-key record ID (not Mongo _user_id/namespace/org_id). Model policy keys are
+(credential_id, model), global-policy keys (credential_id,). Different keys
+of the same owner have independent limits. Comments/owner labels do not reset
+an existing credential bucket. See docs/admission-contract.md.
 
-0 means unlimited (exempt -> not enforced); absent/None means fall through to
-the next level. The counter key ("bucket") is per ``(user, model)`` when the
-limit came from a per-model config and per ``(user,)`` when it came from the
-global config, so a global ``rpm`` is N-per-user (not one hard cap shared by
-all users) and a per-model limit is scoped to that model.
-
-Counters are process-local and in-memory; a restart resets the windows.
+Default local counters are process-local; restart resets RPM windows. Explicit
+shared mode uses scoped database leases/server time, without local fallback.
+Neither profile implements account-wide grouping or daily-token limits.
 """
 
+import asyncio
 import collections
 import contextlib
 import math
@@ -23,9 +20,9 @@ import time
 
 import aiohttp.web
 
-from . import errors, metrics
+from . import errors, leases, metrics
 
-# Dimensions enforced in phase 1. Phase 2 appends the two ``*_tpd`` entries.
+# Only implemented dimensions; unsupported policy fields fail config validation.
 _DIMENSIONS = ("rpm", "concurrency")
 
 # Sliding-window length for rpm, in seconds.
@@ -43,12 +40,13 @@ _ANON = "__anon__"
 
 
 def flush():
-    """Drop all in-memory counters.
+    """Reset rate windows without forgetting ownership of active slots.
 
-    Wired to SIGHUP (reload_config) so an operator can reset the windows without
-    a restart; also used between tests since the state is module-global."""
+    SIGHUP may change admission policy, but an older request still owns its
+    concurrency slot until its finally runs. Clearing that counter would both
+    admit too much work and let the old release decrement a newer request.
+    """
     _rpm.clear()
-    _concurrency.clear()
 
 
 def resolve(user, model, cfg):
@@ -56,7 +54,7 @@ def resolve(user, model, cfg):
 
     Precedence (phase 1): per-model then global. ``0`` exempts (omitted);
     absent falls through. Bucket key is ``(uid, model)`` for a per-model limit
-    and ``(uid,)`` for a global one, so the counter is per-user in both cases.
+    and ``(uid,)`` for a global one; uid means API-key record, not account owner.
     """
     uid = user["id"] if user else _ANON
     model_rl = cfg.get("backends", {}).get(model, {}) \
@@ -88,6 +86,9 @@ def _reject(f_req, dimension, limit, b_name, oldest=None):
 
     if dimension == "rpm":
         msg = "Rate limit exceeded: %d rpm (model '%s')." % (limit, b_name)
+        # Shared windows use server expiry, not this process's monotonic
+        # timestamps: a conservative full window is safe without clock skew.
+        oldest = time.monotonic() if oldest is None else oldest
         retry_after = max(1, math.ceil(
             RPM_WINDOW - (time.monotonic() - oldest)))
     else:
@@ -102,6 +103,55 @@ def _reject(f_req, dimension, limit, b_name, oldest=None):
         code="rate_limit_exceeded", headers=headers)
 
 
+class ParserAdmission:
+    """Application-owned counters; reload never replaces an active owner."""
+
+    def __init__(self):
+        self.active = 0
+        self.users = {}
+
+
+@contextlib.asynccontextmanager
+async def parser_slot(f_req, user):
+    cfg = f_req.app["config"].get("parsing", {})
+    state = f_req.app["parser_admission"]
+    uid = user["id"] if user else _ANON
+    global_limit = cfg.get("concurrency", 4)
+    user_limit = cfg.get("per_user", 2)
+    timeout = cfg.get("timeout", 30.0)
+    local_owned = False
+    shared_context = contextlib.nullcontext()
+    if leases.shared(f_req):
+        shared_context = leases.hold(f_req, [
+            (leases.bucket(f_req, "parser-global"), global_limit),
+            (leases.bucket(f_req, "parser-user", uid), user_limit)])
+    else:
+        if state.active >= global_limit:
+            raise _reject(f_req, "parsing", global_limit, "__parsing__")
+        if state.users.get(uid, 0) >= user_limit:
+            raise _reject(f_req, "parsing", user_limit, "__parsing__")
+        state.active += 1
+        state.users[uid] = state.users.get(uid, 0) + 1
+        local_owned = True
+    try:
+        try:
+            async with shared_context:
+                async with asyncio.timeout(timeout):
+                    yield
+        except leases.LeaseCapacityError as error:
+            raise _reject(f_req, "parsing", error.limit, "__parsing__") from None
+        except TimeoutError:
+            raise errors.json_error(f_req, aiohttp.web.HTTPRequestTimeout,
+                "Request body parsing timed out.", openai_type="timeout_error",
+                anthropic_type="api_error", code="request_timeout") from None
+    finally:
+        if local_owned:
+            state.active -= 1
+            state.users[uid] -= 1
+            if state.users[uid] == 0:
+                del state.users[uid]
+
+
 @contextlib.asynccontextmanager
 async def slot(f_req, user, b_name, b_cfg):
     """Enforce rate limits around one backend request.
@@ -113,6 +163,24 @@ async def slot(f_req, user, b_name, b_cfg):
     client disconnect (the streaming drain keeps the handler alive).
     """
     resolved = resolve(user, b_name, f_req.app["config"])
+
+    if leases.shared(f_req):
+        if "rpm" in resolved:
+            limit, key = resolved["rpm"]
+            admitted = await leases.take_window(f_req,
+                leases.bucket(f_req, "rpm", *key), limit, RPM_WINDOW)
+            if not admitted:
+                raise _reject(f_req, "rpm", limit, b_name)
+        dimensions = []
+        if "concurrency" in resolved:
+            limit, key = resolved["concurrency"]
+            dimensions.append((leases.bucket(f_req, "model-concurrency", *key), limit))
+        try:
+            async with leases.hold(f_req, dimensions):
+                yield
+        except leases.LeaseCapacityError as error:
+            raise _reject(f_req, "concurrency", error.limit, b_name) from None
+        return
 
     # 1. rpm — sliding window of admitted timestamps.
     if "rpm" in resolved:

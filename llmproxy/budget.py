@@ -8,7 +8,6 @@ import copy
 import logging
 
 from . import metrics, provenance, streaming
-from .budget_headers import EXPOSE_HEADERS
 
 
 PATHS = {

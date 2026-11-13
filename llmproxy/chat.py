@@ -9,30 +9,31 @@ from . import (
     auth, billing, budget, decision_adapters, decision_openai, errors,
     metrics, provenance, proxy, streaming,
 )
+from .products import product
 
 
 class _ChatStreamUsage:
-    """on_chunk accumulator for OpenAI chat streams: keep the last non-[DONE]
-    SSE block and expose its ``usage`` object. OpenAI reports usage in the final
-    chunk when ``stream_options.include_usage`` is set, so keeping the last block
-    also captures a usage chunk that arrives separately after ``finish_reason``.
+    """Keep authoritative usage events, never positional comments/keepalives.
+
+    Parsing is shared with Messages/Responses for valid SSE line endings and
+    multi-line data. Nullable normal chunks do not erase the final proof.
     """
 
     def __init__(self):
-        self._last = b""
+        self._usage = None
 
     def __call__(self, chunk):
-        if chunk != b"data: [DONE]\n\n":
-            self._last = chunk
+        event = streaming.parse_sse_event(chunk)
+        if isinstance(event, dict) and event.get('usage') is not None:
+            if not isinstance(event['usage'], dict):
+                raise ValueError('Invalid backend stream usage')
+            self._usage = event['usage']
 
     def usage(self):
-        _, _, raw = self._last.partition(b" ")
-        try:
-            data = json.loads(raw, parse_float=decimal.Decimal)
-        except json.JSONDecodeError:
-            logging.error("Failed parsing usage information: %s", raw)
-            raise
-        return data["usage"]
+        if self._usage is None:
+            logging.error('Missing valid backend stream usage')
+            raise ValueError('Missing backend stream usage')
+        return self._usage
 
 
 def force_include_usage(body):
@@ -64,15 +65,25 @@ async def _chat(f_req):
             request_id=f_req["request_id"])
 
         is_stream = "text/event-stream" in b_res.headers.get("Content-Type", "")
+        usage = None
+
+        async def settle():
+            nonlocal usage
+            if is_stream:
+                usage = usage_acc.usage()
+            await billing.record(f_req, user, {
+                product(b_name, b_cfg["device"], "prompt"): usage["prompt_tokens"],
+                product(b_name, b_cfg["device"], "completion"): usage["completion_tokens"],
+            })
+
         if is_stream:
             usage_acc = _ChatStreamUsage()
             f_res = await streaming.stream_through(f_req, b_res,
                 budget.observer(f_req, usage_acc),
                 extra_headers={**provenance.headers(app["config"]),
-                    **budget.headers(f_req, stream=True)})
-            usage = usage_acc.usage()
+                    **budget.headers(f_req, stream=True)}, before_complete=settle)
         else:
-            body = await b_res.content.read()
+            body = await proxy.read_response(f_req, b_res)
             data = json.loads(body, parse_float=decimal.Decimal)
             f_hdrs = {"Content-Type":
                 b_res.headers.get("Content-Type", "application/octet-stream")}
@@ -81,12 +92,8 @@ async def _chat(f_req):
             f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
             usage = data["usage"]
 
-        await billing.record(f_req, user, {
-            "%s/%s/prompt" % (b_name, b_cfg["device"]):
-                usage["prompt_tokens"],
-            "%s/%s/completion" % (b_name, b_cfg["device"]):
-                usage["completion_tokens"],
-        })
+        if not is_stream:
+            await settle()
 
         app.logger.info("Client used: P:%d C:%d tokens of %s",
             usage["prompt_tokens"], usage["completion_tokens"],

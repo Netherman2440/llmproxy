@@ -18,6 +18,7 @@ import aiohttp.web
 from llmproxy import auth, budget, config, metrics, provenance
 from llmproxy.app import create_app, reload_config
 from llmproxy.db import get_db
+from .metrics_fixtures import AUTH_HEADERS as METRICS_AUTH, TOKEN as METRICS_TOKEN
 
 
 AUTH = {"Authorization": "Bearer budget-test-token"}
@@ -186,6 +187,9 @@ class TestBudgetConfig(unittest.TestCase):
 
 class TestBudgetHTTP(aiohttp.test_utils.AioHTTPTestCase):
     async def asyncSetUp(self):
+        patcher = mock.patch.dict(os.environ, {'LLMPROXY_METRICS_TOKEN': METRICS_TOKEN})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         warnings.simplefilter("ignore", aiohttp.web.NotAppKeyWarning)
         auth.flush_cache()
         self.received = []
@@ -270,6 +274,10 @@ class TestBudgetHTTP(aiohttp.test_utils.AioHTTPTestCase):
                     "delta": {"stop_reason": "max_tokens"},
                     "usage": {k: v for k, v in usage.items() if k != "input_tokens"}}).encode() + b"\n\n"]
         if body.get("stream"):
+            if self.block_stream and chat:
+                # A genuine pre-terminal frame lets a client disconnect while
+                # the later finish/usage is held behind the accounting barrier.
+                chunks.insert(0, b'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n')
             self.upstream_bytes.append(b"".join(chunks))
             res = aiohttp.web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await res.prepare(req)
@@ -309,7 +317,8 @@ class TestBudgetHTTP(aiohttp.test_utils.AioHTTPTestCase):
         self.assertEqual(len(rows), 16)
         self.assertEqual(sum(row["quantity"] for row in rows if row["product"].endswith("/completion")), 80)
         self.assertTrue(all(row["product"].startswith("public/test/") for row in rows))
-        async with self.client.get("/metrics") as res:
+        async with self.client.get('/metrics', headers=METRICS_AUTH) as res:
+            self.assertEqual(res.status, 200)
             text = await res.text()
             self.assertIn('llmproxy_truncation_total{model="public",reason="unknown",stream="true"}', text)
             self.assertIn('llmproxy_reasoning_tokens_total{model="public"}', text)
@@ -356,7 +365,8 @@ class TestBudgetHTTP(aiohttp.test_utils.AioHTTPTestCase):
             async with self.client.get("/v1/models/unknown-%d" % i, headers=AUTH) as res:
                 self.assertEqual(res.status, 404)
                 self.assertEqual((await res.json())["error"]["code"], "model_not_found")
-        async with self.client.get("/metrics") as res:
+        async with self.client.get('/metrics', headers=METRICS_AUTH) as res:
+            self.assertEqual(res.status, 200)
             text = await res.text()
             self.assertIn('path="/v1/models/{id}"', text)
             self.assertNotIn('path="/v1/models/unknown-', text)

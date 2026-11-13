@@ -20,6 +20,7 @@ import aiohttp
 import aiohttp.web
 
 from . import auth, billing, budget, metrics, provenance, proxy, streaming
+from .products import product
 
 
 # Terminal Responses events carrying final usage. `response.incomplete`
@@ -119,8 +120,8 @@ class _ResponsesStreamUsage:
 
 def _bill_map(billed, b_name, device):
     return {
-        "%s/%s/prompt" % (b_name, device): billed["prompt_tokens"],
-        "%s/%s/completion" % (b_name, device): billed["completion_tokens"],
+        product(b_name, device, "prompt"): billed["prompt_tokens"],
+        product(b_name, device, "completion"): billed["completion_tokens"],
     }
 
 
@@ -140,15 +141,24 @@ async def responses(f_req):
                 request_id=f_req["request_id"])
 
             is_stream = "text/event-stream" in b_res.headers.get("Content-Type", "")
+            usage, billed = None, None
+
+            async def settle():
+                nonlocal usage, billed
+                if is_stream:
+                    usage = usage_acc.usage()
+                billed = to_billing_tokens(usage)
+                await billing.record(f_req, user,
+                    _bill_map(billed, b_name, b_cfg["device"]))
+
             if is_stream:
                 usage_acc = _ResponsesStreamUsage()
                 f_res = await streaming.stream_through(f_req, b_res,
                     budget.observer(f_req, usage_acc),
                     extra_headers={**provenance.headers(app["config"]),
-                        **budget.headers(f_req, stream=True)})
-                usage = usage_acc.usage()
+                        **budget.headers(f_req, stream=True)}, before_complete=settle)
             else:
-                body = await b_res.content.read()
+                body = await proxy.read_response(f_req, b_res)
                 data = json.loads(body, parse_float=decimal.Decimal)
                 f_hdrs = {"Content-Type":
                     b_res.headers.get("Content-Type",
@@ -158,9 +168,8 @@ async def responses(f_req):
                 f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
                 usage = data["usage"]
 
-            billed = to_billing_tokens(usage)
-            await billing.record(f_req, user,
-                _bill_map(billed, b_name, b_cfg["device"]))
+            if not is_stream:
+                await settle()
 
             app.logger.info("Client used (responses): P:%d C:%d of %s",
                 billed["prompt_tokens"], billed["completion_tokens"], b_name)

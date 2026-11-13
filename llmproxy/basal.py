@@ -1,5 +1,6 @@
 """Basal wire protocol: native question validation, workload and calibrated answers."""
 
+import json
 import math
 from dataclasses import dataclass
 
@@ -12,6 +13,68 @@ CHAT_FIELDS = frozenset(("messages", "stream_options", "max_tokens",
     "frequency_penalty", "presence_penalty", "n", "tools", "tool_choice",
     "response_format", "orders"))
 MAX_TOKENS = 2 ** 63 - 1
+
+
+TOOL_EXTRAS = ('answer_directly', 'ask_user', 'none')
+
+
+def _wire_keys(values):
+    if not isinstance(values, (dict, list, tuple)):
+        return frozenset()
+    try:
+        # JSON object keys normalize numeric/native list keys on the wire.
+        return frozenset(json.loads(json.dumps(dict.fromkeys(values), allow_nan=False)))
+    except (TypeError, ValueError, OverflowError):
+        return frozenset()
+
+
+def _option_universe(question, kind, multi):
+    """Snapshot native wire identities, without rewriting request semantics.
+
+    Basal 2.x: choice/multi lists are keys; score lists are positional levels;
+    tool-single has three default extras, tool-multi none. Invalid native
+    payloads still reach the backend for its client-error response, but an
+    invalid/unknown universe cannot authorize a successful bill.
+    """
+    actions = frozenset()
+    if kind == 'tool':
+        definitions = question.get('tools')
+        extras = question.get('extra', [] if multi else list(TOOL_EXTRAS))
+        if (not isinstance(definitions, list) or not isinstance(extras, list)
+                or any(not isinstance(value, str) or value not in TOOL_EXTRAS for value in extras)):
+            return frozenset(), actions
+        names = []
+        for definition in definitions:
+            if not isinstance(definition, dict):
+                return frozenset(), actions
+            function = definition.get('function', definition)
+            name = function.get('name') if isinstance(function, dict) else None
+            if not isinstance(name, str) or not name:
+                return frozenset(), actions
+            names.append(name)
+        keys = _wire_keys(names + extras)
+    elif kind == 'noul':
+        keys = frozenset(('true', 'false'))
+    elif kind == 'score':
+        levels = question.get('criteria') or question.get('levels') or []
+        keys = _wire_keys(levels if isinstance(levels, dict)
+            else [str(index) for index in range(len(levels))] if isinstance(levels, list) else [])
+    else:
+        criteria = question.get('criteria') or {}
+        if kind == 'act' and (question.get('base') == 'noul'
+                or isinstance(criteria, dict) and set(criteria) <= {'true', 'false'}):
+            keys = frozenset(('true', 'false'))
+        else:
+            keys = _wire_keys(criteria)
+    if kind == 'act':
+        costs = question.get('costs')
+        if isinstance(costs, dict):
+            if set(costs) <= {'wrong', 'defer'} and not isinstance(costs.get('wrong'), dict):
+                if 'wrong' in costs:
+                    actions = keys | (frozenset(('defer',)) if 'defer' in costs else frozenset())
+            else:
+                actions = _wire_keys(costs)
+    return keys, actions
 
 
 def prepare(body, limits):
@@ -52,7 +115,7 @@ def prepare(body, limits):
         else:
             count = 1
         branches += count
-        expected[name] = (kind, multi)
+        expected[name] = (kind, multi, *_option_universe(question, kind, multi))
     # These are logical branches as in usage.branches. Option orders are an
     # upstream deployment setting, not a supported per-request override.
     if branches > limits["max_branches"]:
@@ -80,16 +143,21 @@ def validate_response(data, expected):
     answers = data.get("answers")
     if not isinstance(answers, dict) or set(answers) != set(expected):
         raise ValueError("invalid_answers")
-    for name, (kind, multi) in expected.items():
+    for name, (kind, multi, option_keys, action_keys) in expected.items():
         answer = answers[name]
         if not isinstance(answer, dict) or answer.get("type") != kind:
             raise ValueError("invalid_answers")
         probabilities = answer.get("probabilities")
-        if not isinstance(probabilities, dict) or not probabilities:
+        if (not isinstance(probabilities, dict) or not probabilities
+                or set(probabilities) != option_keys):
             raise ValueError("invalid_answers")
         for value in probabilities.values():
             _number(value, probability=True)
         _number(answer.get("set_confidence" if multi else "confidence"), probability=True)
+        if 'refused' in answer and answer['refused'] is not None:
+            allowed = action_keys if kind == 'act' else option_keys
+            if not isinstance(answer['refused'], str) or answer['refused'] not in allowed:
+                raise ValueError('invalid_answers')
         if multi:
             selected = answer.get("tools" if kind == "tool" else "selected")
             if (not isinstance(selected, list) or any(not isinstance(key, str)
@@ -98,18 +166,20 @@ def validate_response(data, expected):
         elif kind in ("choice", "act", "tool"):
             field = {"choice": "choice", "act": "action", "tool": "tool"}[kind]
             value = answer.get(field)
-            if kind == "tool" and value is None and answer.get("deferred") is True:
-                continue
-            if not isinstance(value, str):
-                raise ValueError("invalid_answers")
-            if kind != "act" and value not in probabilities:
-                raise ValueError("invalid_answers")
+            deferred_tool = kind == 'tool' and value is None and answer.get('deferred') is True
+            if not deferred_tool and (not isinstance(value, str)
+                    or kind != 'act' and value not in probabilities):
+                raise ValueError('invalid_answers')
             if kind == "act":
                 costs = answer.get("expected_costs")
-                if not isinstance(costs, dict) or value not in costs:
+                if (not isinstance(costs, dict) or value not in costs
+                        or set(costs) != action_keys):
                     raise ValueError("invalid_answers")
                 for cost in costs.values():
                     _number(cost)
+                if 'answer' in answer and (not isinstance(answer['answer'], str)
+                        or answer['answer'] not in option_keys):
+                    raise ValueError('invalid_answers')
         elif kind == "noul":
             _number(answer.get("noul"), probability=True)
         elif kind == "score":
@@ -126,6 +196,9 @@ def validate_response(data, expected):
                 if not isinstance(item, dict):
                     raise ValueError("invalid_answers")
                 _number(item.get("probability"), probability=True)
+                if kind == 'tool' and (not isinstance(item.get('tool'), str)
+                        or item['tool'] not in option_keys):
+                    raise ValueError('invalid_answers')
     return usage
 
 

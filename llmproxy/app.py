@@ -12,9 +12,10 @@ import aiohttp.web
 import yarl
 
 from . import (
-    audio, auth, budget, chat, config, decision_openai, decisions, embeddings,
-    files, messages, metrics, ratelimit, responses,
+    audio, auth, chat, config, decision_openai, decisions, delivery, embeddings,
+    files, messages, metrics, ratelimit, realtime, receipt_realtime, responses,
 )
+from .budget_headers import EXPOSE_HEADERS
 from .db import get_db, shutdown_all
 
 
@@ -71,13 +72,24 @@ async def add_cors_headers(req, handler):
         res = await handler(req)
     except aiohttp.web.HTTPMethodNotAllowed as e:
         if e.method != "OPTIONS":
+            _apply_cors(req, e)
             raise
         res = aiohttp.web.Response()
+    except aiohttp.web.HTTPException as e:
+        # Raised API errors (401/400/429/502...) must stay readable by a
+        # configured browser origin. An HTTPException is itself a Response;
+        # decorate it and re-raise so error semantics are unchanged.
+        _apply_cors(req, e)
+        raise
+    _apply_cors(req, res)
+    return res
+
+
+def _apply_cors(req, res):
     res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-    res.headers["Access-Control-Expose-Headers"] = budget.EXPOSE_HEADERS
+    res.headers["Access-Control-Expose-Headers"] = EXPOSE_HEADERS
     if o := req.app["config"].get("http_origin"):
         res.headers["Access-Control-Allow-Origin"] = o
-    return res
 
 
 @aiohttp.web.middleware
@@ -103,7 +115,7 @@ async def limit_request_body(req, handler):
     # (req._client_max_size is enforced during the read, so it also covers
     # chunked bodies with no Content-Length; aiohttp has no public per-route
     # limit), and reject early when the client declares an oversized body.
-    if req.path not in UPLOAD_PATHS:
+    if req.path not in UPLOAD_PATHS or req.content_type != "multipart/form-data":
         # Only upload routes consume multipart. On the JSON text endpoints a
         # multipart body would be parsed by aiohttp's post(): each non-file
         # field is read WHOLE into memory before _client_max_size is checked, so
@@ -128,9 +140,10 @@ def reload_config(app):
         return
 
     # Only backends, rate limits (and the file-conversion poll limits),
-    # provenance, budgets and auth cache settings are reloaded
+    # parsing admission, provenance, budgets and auth cache settings are reloaded
     app["config"]["backends"] = cfg.get("backends", {})
     app["config"]["rate_limit"] = cfg.get("rate_limit", {})
+    app["config"]["parsing"] = cfg.get("parsing", {})
     app["config"]["files"] = cfg.get("files", {})
     app["config"]["provenance"] = cfg.get("provenance", {})
     app["config"]["budget"] = cfg.get("budget", {})
@@ -167,6 +180,11 @@ async def create_app(cfg):
             limit_request_body,
         ])
 
+    # Bounded concurrent exact credential lookups on cache misses (distinct
+    # attacker digests), and the deadline a queued lookup may wait.
+    app["auth_lookup_slots"] = asyncio.Semaphore(
+        cfg.get("auth_lookup_concurrency", 16))
+
     # A new GENERATIVE endpoint must add AI Act provenance marking itself
     # (there is no middleware for it -- see llmproxy/provenance.py):
     # provenance.mark() on the non-streaming branch, provenance.headers() via
@@ -181,6 +199,7 @@ async def create_app(cfg):
         aiohttp.web.get("/v1/models/{id}", chat.model),
         aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
+        aiohttp.web.get("/v1/realtime", realtime.realtime),
         aiohttp.web.post("/v1/files/convert", files.convert),
         # No HEAD: a poll may claim and bill the result, which a HEAD (no
         # body) must not do.
@@ -210,8 +229,12 @@ async def create_app(cfg):
     )
 
     app["config"] = cfg
+    app["parser_admission"] = ratelimit.ParserAdmission()
 
     await check_db(app)
+    delivery.setup(app)
+    if cfg.get('realtime', {}).get('mode', 'legacy') == 'receipt-v1':
+        await receipt_realtime.setup(app)
 
     timeout = aiohttp.ClientTimeout(
         connect=app["config"]["timeout_connect"],
@@ -233,6 +256,34 @@ async def create_app(cfg):
     return app
 
 
+ACCESS_LOG_FORMAT = "%a \"%r\" %s %Tfs"
+
+
+class RedactingAccessLogger(aiohttp.web.AccessLogger):
+    """Access-log request line without linkable conversion identifiers.
+
+    App-level logs already shorten job/backend ids (files._log_ids); this
+    keeps the standard access log from persisting the full poll target.
+    aiohttp's compiled format atoms bind the BASE AccessLogger._format_r,
+    so a plain subclass override would be silently ignored; redact here.
+    """
+
+    REDACTED_PREFIXES = ("/v1/files/convert/",)
+
+    def _format_line(self, request, response, time):
+        pairs = list(super()._format_line(request, response, time))
+        if request is None:
+            return pairs
+        target = request.path_qs
+        for prefix in self.REDACTED_PREFIXES:
+            if target.startswith(prefix):
+                line = (f"{request.method} {prefix}[REDACTED] "
+                    f"HTTP/{request.version.major}.{request.version.minor}")
+                return [(key, line if key == "first_request_line" else value)
+                    for key, value in pairs]
+        return pairs
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("-c", "--config", type=pathlib.Path)
 parser.add_argument("--create-config", action="store_true")
@@ -246,6 +297,10 @@ def main():
     except (OSError, config.ConfigError) as e:
         print("Failed loading config:", e, file=sys.stderr)
         sys.exit(1)
+
+    if args.create_config:
+        # Explicit preparation command, never bind a listener or touch billing.
+        return
 
     log_fmt = "%(asctime)s %(levelname)s %(message)s"
     logging.basicConfig(format=log_fmt, level=cfg["log_level"])
@@ -275,7 +330,8 @@ def main():
         host=app["config"]["host"],
         port=app["config"]["port"],
         ssl_context=ssl_ctx,
-        access_log_format="%a \"%r\" %s %Tfs",
+        access_log_format=ACCESS_LOG_FORMAT,
+        access_log_class=RedactingAccessLogger,
         loop=loop,
         # Billing-critical: on client disconnect the handler MUST run to
         # completion so the backend stream is drained and usage is billed.

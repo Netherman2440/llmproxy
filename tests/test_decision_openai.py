@@ -226,7 +226,8 @@ class TestOpenAIDecisions(LLMProxyAppTestCase):
 
     async def test_native_routes_keep_native_format_and_chat_rejects_decision_models(self):
         self.control.clear()
-        native = {"model": "basal-20-max", "state": "test", "questions": {"category": {"type": "choice"}}}
+        native = {"model": "basal-20-max", "state": "test", "questions": {"category": {
+            "type": "choice", "criteria": {"yes": "Yes", "no": "No"}}}}
         for path in ("/v1/systemone",):
             response = await self.post(native, path=path)
             self.assertEqual(response.status, 200)

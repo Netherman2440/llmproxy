@@ -8,7 +8,16 @@ import aiohttp
 import yarl
 from aiohttp import http_exceptions
 
-from . import budget, errors, metrics, ratelimit
+from . import body as body_parser
+from . import attempts, budget, errors, metrics, ratelimit
+
+
+RESPONSE_MAX_BYTES = 32 * 1024 * 1024
+ERROR_RESPONSE_MAX_BYTES = 64 * 1024
+
+
+class ResponseTooLarge(ValueError):
+    """A bounded upstream response exceeded its byte budget."""
 
 
 CONTEXT_LENGTH_MARKERS = (
@@ -73,7 +82,7 @@ async def _read_body(f_req):
     """Parse the JSON or multipart body, or raise a 400 if it is malformed."""
     multipart = f_req.content_type == "multipart/form-data"
     try:
-        body = await (f_req.post() if multipart else f_req.json())
+        body = await (body_parser.read_multipart(f_req) if multipart else f_req.json())
     except BaseException as e:
         # aiohttp only closes the temp files post() spools file parts to
         # after a successful post(). Otherwise they live on in its frame,
@@ -126,7 +135,8 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
 
     if f_req.content_type not in ("application/json", "multipart/form-data"):
         raise aiohttp.web.HTTPUnsupportedMediaType()
-    f_body = await _read_body(f_req)
+    async with ratelimit.parser_slot(f_req, user):
+        f_body = await _read_body(f_req)
 
     b_name = f_body.get("model")
     # A missing model (absent or null) is a malformed request, as in the
@@ -218,11 +228,13 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
             # backend, so it must not count as that user's model usage. The
             # in-flight gauge is released on every exit path (see finally).
             with metrics.track_user_request(user, b_name):
-                async with app["client"].post(
-                        b_url, headers=b_hdrs, data=b_body, ssl=ssl,
-                        timeout=timeout) as b_res:
-                    observe_backend_response(b_name, b_res, b_start)
-                    yield b_res, b_name, b_cfg
+                async with attempts.track_request(f_req, user, b_name, b_cfg):
+                    async with app["client"].post(
+                            b_url, headers=b_hdrs, data=b_body, ssl=ssl,
+                            timeout=timeout) as b_res:
+                        f_req['http_attempt_backend_status'] = b_res.status
+                        observe_backend_response(b_name, b_res, b_start)
+                        yield b_res, b_name, b_cfg
 
 
 def observe_backend_response(b_name, b_res, b_start):
@@ -250,45 +262,48 @@ def backend_errors(f_req, b_name):
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
         metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "timeout").inc()
-        app.logger.error("Backend timeout: request_id=%s model=%s error=%s",
-            f_req["request_id"], b_name, e)
+        app.logger.error("Backend timeout: request_id=%s model=%s category=%s",
+            f_req["request_id"], b_name, type(e).__name__)
         raise aiohttp.web.HTTPGatewayTimeout() from e
     except (aiohttp.ClientConnectorError, aiohttp.ServerConnectionError,
             aiohttp.ClientPayloadError, aiohttp.ClientResponseError,
-            aiohttp.InvalidURL) as e:
+            aiohttp.InvalidURL, ResponseTooLarge) as e:
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
         metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "connection").inc()
-        app.logger.error("Backend error: request_id=%s model=%s error=%s",
-            f_req["request_id"], b_name, e)
+        app.logger.error("Backend error: request_id=%s model=%s category=%s",
+            f_req["request_id"], b_name, type(e).__name__)
         raise aiohttp.web.HTTPBadGateway() from e
     except aiohttp.ClientError as e:
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
         metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "client_error").inc()
-        app.logger.error("HTTP client error: request_id=%s model=%s error=%s",
-            f_req["request_id"], b_name, e)
+        app.logger.error("HTTP client error: request_id=%s model=%s category=%s",
+            f_req["request_id"], b_name, type(e).__name__)
         raise aiohttp.web.HTTPInternalServerError() from e
 
 
 async def check_response(app, b_name, b_res, expected_status=200,
-        request_id=None, *, max_bytes=None, log_body=True):
+        request_id=None, *, max_bytes=None, map_context_length=True):
     """Raise on backend responses that don't match the expected status.
 
     4xx errors are forwarded as-is (client errors from the backend).
     Everything else (5xx, unexpected 2xx/3xx) is masked with a generic 502
-    to avoid leaking internals or parsing unexpected response bodies.
+    to avoid leaking internals or parsing unexpected response bodies. Routine
+    logs retain status/length only; context-length mapping is independent of logging.
     """
     if b_res.status == expected_status:
         return
 
-    body = await read_limited(b_res, max_bytes) if max_bytes is not None else await b_res.read()
+    limit = max_bytes if max_bytes is not None else app["config"].get(
+        "max_error_response_bytes", ERROR_RESPONSE_MAX_BYTES)
+    body = await read_limited(b_res, limit)
 
+    # MIME strings and exception messages are backend-controlled too; neither
+    # is a safe substitute for a removed document/prompt body preview.
     app.logger.error(
-        'Backend "%s" unexpected status: request_id=%s status=%d '
-        'content_type=%s body_len=%d body_preview=%s',
-        b_name, request_id, b_res.status, b_res.content_type, len(body),
-        body[:1024].decode("utf-8", errors="replace") if log_body else "[omitted]")
+        'Backend "%s" unexpected status: request_id=%s status=%d body_len=%d',
+        b_name, request_id, b_res.status, len(body))
 
     if 400 <= b_res.status < 500:
         exc = aiohttp.web.HTTPBadRequest(content_type=b_res.content_type)
@@ -296,7 +311,7 @@ async def check_response(app, b_name, b_res, expected_status=200,
         exc.body = body
         raise exc
 
-    if log_body and b_res.status >= 500 and looks_like_context_length_error(body):
+    if map_context_length and b_res.status >= 500 and looks_like_context_length_error(body):
         raise aiohttp.web.HTTPUnprocessableEntity(
             text=json.dumps({
                 "error": {
@@ -311,11 +326,17 @@ async def check_response(app, b_name, b_res, expected_status=200,
     raise aiohttp.web.HTTPBadGateway()
 
 
+async def read_response(request, response, *, limit=None):
+    if limit is None:
+        limit = request.app["config"].get("max_response_bytes", RESPONSE_MAX_BYTES)
+    return await read_limited(response, limit)
+
+
 async def read_limited(response, limit):
     """Bound actual decoded bytes, including chunked/compressed responses."""
     body = bytearray()
     async for chunk in response.content.iter_chunked(min(65536, limit + 1)):
         if len(body) + len(chunk) > limit:
-            raise ValueError("response_too_large")
+            raise ResponseTooLarge("response_too_large")
         body.extend(chunk)
     return bytes(body)

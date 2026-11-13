@@ -1,13 +1,25 @@
 import asyncio
 import datetime
 import decimal
-import hashlib
-import importlib.resources
 import logging
 import sqlite3
 import uuid
 
+from .accounting_mongo import MongoAccounting
+from .accounting_sqlite import SqliteAccounting
+from .admission import MongoAdmission, SqliteAdmission
+from .attempts_mongo import MongoAttempts
+from .attempts_sqlite import SqliteAttempts
+from .delivery_mongo import MongoDelivery
+from .delivery_sqlite import SqliteDelivery
+from .expiry import valid_expiry
+from .migrations import upgrade_sqlite
+
 logger = logging.getLogger(__name__)
+# Driver DEBUG messages repr the queued SQL call, including all parameters.
+# Journals/auth contain private identifiers and digests; root DEBUG must not
+# turn them into routine logs. Keep only the driver's warning/error channel.
+logging.getLogger('aiosqlite').setLevel(logging.WARNING)
 
 # Process-global Mongo clients, keyed by URI. A Motor client owns a connection
 # pool and a topology monitor and is meant to live for the life of the process;
@@ -97,7 +109,7 @@ class DatabaseError(Exception):
     pass
 
 
-class MongoDatabase:
+class MongoDatabase(MongoAdmission, MongoAccounting, MongoDelivery, MongoAttempts):
     @classmethod
     async def create(cls, uri):
         # Fast path: a client for this URI already exists. Checked before the
@@ -159,6 +171,40 @@ class MongoDatabase:
     async def user_create(self, secret_hash, expires=None, comment=None):
         raise NotImplementedError("not implemented for MongoDB")
 
+    async def user_get(self, secret_hash):
+        """Exact credential point lookup; None when the key is absent."""
+        import pymongo.errors
+
+        if not isinstance(secret_hash, str) or not secret_hash:
+            raise ValueError('Exact credential digest required')
+        try:
+            key = await self.db["cgc"]["api_keys"].find_one({
+                "access_level": "LLM",
+                "secret": secret_hash,
+                "$or": [
+                    {"date_expiry": None},
+                    {"date_expiry": {"$gt": datetime.datetime.now(datetime.UTC)}},
+                ],
+            })
+            if key is None:
+                return None
+            user = await self.db["cgc"]["rest_users"].find_one(
+                {"_id": key["user_id"]})
+            if user is None:
+                return None
+        except pymongo.errors.PyMongoError as e:
+            raise DatabaseError(e) from e
+        return {
+            "id": key["_id"],
+            "_user_id": key["user_id"],
+            "_namespace": user["namespace"],
+            "_org_id": str(user.get("org_id", "")),
+            "_tier": user.get("subscription_level", ""),
+            "secret": key["secret"],
+            "expires": key.get("date_expiry", None),
+            "comment": key.get("comment"),
+        }
+
     async def user_list(self, secret_hash="", include_expired=False):
         import pymongo.errors
 
@@ -213,7 +259,7 @@ class MongoDatabase:
             raise DatabaseError(e) from e
 
 
-class SqliteDatabase:
+class SqliteDatabase(SqliteAdmission, SqliteAccounting, SqliteDelivery, SqliteAttempts):
     @classmethod
     async def create(cls, uri):
         import aiosqlite
@@ -225,22 +271,16 @@ class SqliteDatabase:
         self.db = await aiosqlite.connect(path)
         logger.debug("Connected to database")
 
-        # user_version is the schema-initialization marker (0 = uninitialized).
-        # schema.sql is idempotent (CREATE TABLE IF NOT EXISTS), so applying it
-        # to a version-0 database that already has the tables — e.g. one made
-        # with `sqlite3 db.sqlite < schema.sql`, which does not stamp
-        # user_version — is safe and simply heals the marker to 1. NOTE: this is
-        # a single-version init, not a migration ladder; a future schema v2 needs
-        # real migrations here, and a divergent v0 table would be accepted as-is
-        # (surfacing only at query time) rather than failing loudly at startup.
-        cur = await self.db.execute("PRAGMA user_version")
-        ver, = await cur.fetchone()
-        if ver == 0:
-            schema = importlib.resources.files("llmproxy") \
-                .joinpath("schema.sql").read_text()
-            await self.db.executescript(schema)
-            await self.db.execute("PRAGMA user_version = 1")
-            logger.info("Initialized database to version 1")
+        try:
+            await self.db.execute('PRAGMA synchronous=FULL')
+            await self.db.execute('PRAGMA foreign_keys=ON')
+            await upgrade_sqlite(self.db)
+        except Exception as error:
+            await self.db.close()
+            raise DatabaseError("Database schema initialization failed") from error
+        except BaseException:
+            await self.db.close()
+            raise
 
         self.db.row_factory = self.dict_factory
 
@@ -270,24 +310,42 @@ class SqliteDatabase:
 
         return id_
 
+    async def user_get(self, secret_hash):
+        """Exact credential point lookup (indexed); None when absent.
+
+        The operator CLI keeps ``user_list`` prefix search; authentication
+        must never scan the key table per request.
+        """
+        try:
+            rows = await self.db.execute_fetchall("""
+                SELECT id, secret, expires, IFNULL(comment, '') AS comment
+                FROM api_key
+                WHERE type = 'LLM' AND secret = ?
+                """, (secret_hash,))
+        except sqlite3.DatabaseError as e:
+            raise DatabaseError(e) from e
+        return rows[0] if rows else None
+
     async def user_list(self, secret_hash="", include_expired=False):
         try:
             cur = await self.db.execute("""
-                SELECT id, secret, expires,
-                    CASE WHEN CURRENT_TIMESTAMP >= expires THEN 'expired'
-                        ELSE 'active' END AS status,
-                    IFNULL(comment, '') AS comment
+                SELECT id, secret, expires, IFNULL(comment, '') AS comment
                 FROM api_key
                 WHERE type = 'LLM' AND secret LIKE ? || '%'
-                    AND (? OR expires > datetime() OR expires IS NULL)
-                """, (secret_hash, include_expired))
+                """, (secret_hash,))
         except sqlite3.DatabaseError as e:
             raise DatabaseError(e) from e
 
         rows = await cur.fetchall()
         await cur.close()
 
-        return rows
+        # SQLite's lexical comparisons mix ISO 'T' with a space; datetime()
+        # also truncates fractional seconds. Apply the same exact UTC policy
+        # as auth, including malformed data, to both CLI status and filtering.
+        now = datetime.datetime.now(datetime.UTC)
+        for row in rows:
+            row["status"] = "active" if valid_expiry(row["expires"], now) else "expired"
+        return rows if include_expired else [row for row in rows if row["status"] == "active"]
 
     async def user_update(self, user, **kwargs):
         assert kwargs.keys() <= {"expires", "comment"}

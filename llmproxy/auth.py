@@ -1,12 +1,15 @@
+import asyncio
 import collections
 import datetime
 import hashlib
+import hmac
 import time
 
 import aiohttp.web
 
 from . import metrics
 from .db import DatabaseError, get_db
+from .expiry import normalize_expires as _normalize_expires, valid_expiry
 
 # Default TTL (seconds) for the in-process auth cache. 0 disables it.
 DEFAULT_CACHE_TTL = 5
@@ -26,10 +29,6 @@ CACHE_MAX_ENTRIES = 8192
 # than inside it so the dict handed to callers is identical on hit and miss.
 _cache = collections.OrderedDict()
 
-# Sentinel: this row's expires could not be parsed, so it must never be cached
-# (we cannot re-evaluate expiry in-process and would risk honouring a stale key).
-_UNPARSEABLE = object()
-
 
 def flush_cache():
     """Drop every cached lookup.
@@ -38,31 +37,6 @@ def flush_cache():
     keeps working, and this is the operator's lever to make that immediate
     without restarting the proxy."""
     _cache.clear()
-
-
-def _normalize_expires(value):
-    """Coerce a row's ``expires`` into an aware UTC datetime, or None.
-
-    SQLite hands back an ISO string (datetimes are stored via the isoformat
-    adapter registered in db.py); Mongo hands back a datetime that is already
-    aware because the client is built with tz_aware=True. Normalizing once, at
-    insertion, keeps the per-request check to a single comparison."""
-    if value is None:
-        return None
-
-    if isinstance(value, str):
-        try:
-            value = datetime.datetime.fromisoformat(value)
-        except ValueError:
-            return _UNPARSEABLE
-
-    if not isinstance(value, datetime.datetime):
-        return _UNPARSEABLE
-
-    if value.tzinfo is None:
-        return value.replace(tzinfo=datetime.UTC)
-
-    return value
 
 
 def _cache_get(digest, now):
@@ -85,9 +59,9 @@ def _cache_put(digest, row, expires_at, ttl, now):
         _cache.popitem(last=False)
 
 
-async def require_auth(req):
+async def require_auth(req, *, fresh=False):
     scheme, _, token = req.headers.get("Authorization", "").partition(" ")
-    if scheme != "Bearer":
+    if scheme != "Bearer" or not token:
         raise aiohttp.web.HTTPUnauthorized(text="Unsupported authorization scheme")
 
     digest = hashlib.sha256(token.encode()).hexdigest()
@@ -95,17 +69,14 @@ async def require_auth(req):
     ttl = req.app["config"].get("auth_cache_ttl", DEFAULT_CACHE_TTL)
     now = time.monotonic()
 
-    if ttl > 0 and (entry := _cache_get(digest, now)) is not None:
+    if not fresh and ttl > 0 and (entry := _cache_get(digest, now)) is not None:
         metrics.AUTH_CACHE_HITS_TOTAL.inc()
         row, expires_at, _ = entry
         if row is None:
             raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
-        # Expiry is re-evaluated here rather than trusted from the cached
-        # lookup. user_list filters expired keys in the query, so a cached row
-        # would otherwise keep an expired key alive for the whole TTL — which
-        # matters most for exactly the short-lived keys expiry exists for.
-        if expires_at is not None \
-                and expires_at <= datetime.datetime.now(datetime.UTC):
+        # Expiry remains authoritative on both cache paths; corrupt dates
+        # never become unlimited access even if an adapter returned the row.
+        if not valid_expiry(expires_at, datetime.datetime.now(datetime.UTC)):
             del _cache[digest]
             raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
         # A copy, so a handler mutating the user dict cannot poison the cache.
@@ -117,22 +88,43 @@ async def require_auth(req):
     # above the request never opens one.
     db = await get_db(req.app["config"]["db"]["uri"], req)
 
+    # Bounded auth work: distinct attacker-chosen digests cannot open an
+    # unbounded number of concurrent exact lookups ahead of admission.
+    # Waiting counts against the same deadline; saturation fails closed.
+    slots = req.app.get("auth_lookup_slots")
+    lookup = db.user_get(digest)
     try:
-        rows = await db.user_list(digest)
+        if slots is not None:
+            # Queue wait counts against the same deadline: a flood of distinct
+            # digests cannot pile up unbounded waiters ahead of admission.
+            async with asyncio.timeout(
+                    req.app["config"].get("auth_lookup_timeout", 5.0)):
+                async with slots:
+                    row = await lookup
+        else:
+            row = await lookup
+    except TimeoutError:
+        raise aiohttp.web.HTTPServiceUnavailable(
+            text="Authentication is busy") from None
     except DatabaseError as e:
         req.app.logger.critical(e)
         raise aiohttp.web.GracefulExit() from e
 
-    if not rows:
+    if row is None:
         if ttl > 0:
             _cache_put(digest, None, None, min(ttl, NEGATIVE_CACHE_TTL), now)
         raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
 
-    row = rows[0]
+    # user_get is an exact indexed point lookup, but the full-digest check
+    # stays: an adapter must never be trusted to have filtered exactly.
+    if not (isinstance(row.get("secret"), str)
+            and hmac.compare_digest(row["secret"].encode(), digest.encode())):
+        raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
+    if not valid_expiry(row.get("expires"), datetime.datetime.now(datetime.UTC)):
+        raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
 
     if ttl > 0:
         expires_at = _normalize_expires(row.get("expires"))
-        if expires_at is not _UNPARSEABLE:
-            _cache_put(digest, dict(row), expires_at, ttl, now)
+        _cache_put(digest, dict(row), expires_at, ttl, now)
 
     return row

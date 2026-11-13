@@ -2,8 +2,19 @@ __pycache__/
 *.pyc
 .venv/
 .dist/
+/build/
 *.egg-info/
 AGENTS-tmobile.md
 # Dev environment: local config (contains backend tokens), scratch SQLite DB
 dev/
+secrets/
+state/
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+image.tar
+trivy.json
 

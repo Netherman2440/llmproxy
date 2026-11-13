@@ -1,24 +1,88 @@
-stages:
-  - test
-  - image
+stages: [test, image, scan, publish]
 
-test-job:
+unit:
   stage: test
-  image: alpine:3.20.3
-  dependencies: []
+  image: python:3.12-slim-bookworm@sha256:0f086103b026048cc50cb5da25ec435c023c5241a83fc44daea593377abc61c4
   script:
-    - apk add py3-aiohttp py3-aiosqlite py3-prometheus-client py3-yarl
-    - python3 -m unittest
+    - python -m pip install --require-hashes -r requirements-runtime.lock
+    - python -m unittest discover
 
-image-job:
+# Protected release pipelines need a masked/protected AUDIT_MONGO_PASSWORD
+# variable for this synthetic, job-private service. Never use a customer secret.
+mongo:
+  stage: test
+  image: python:3.12-slim-bookworm@sha256:0f086103b026048cc50cb5da25ec435c023c5241a83fc44daea593377abc61c4
+  services:
+    - name: mongo@sha256:1d7a2d487c6465ea022474b90b65d6c91bb600b421b65880d8c6e141d6122200
+      alias: audit-stt-mongo
+      entrypoint: ["/bin/bash", "-lc"]
+      command:
+        - >-
+          set -eu; umask 077;
+          mongosh --nodb --quiet --eval 'const fs=require("fs"),c=require("crypto");fs.writeFileSync("/data/db/.ci-key",c.randomBytes(512).toString("base64"),{mode:0o400});' >/dev/null;
+          chown mongodb:mongodb /data/db/.ci-key;
+          exec /usr/local/bin/docker-entrypoint.sh mongod --replSet auditstt --bind_ip_all --keyFile /data/db/.ci-key --auth
+  variables:
+    MONGO_INITDB_ROOT_USERNAME: stt_audit_admin
+    MONGO_INITDB_ROOT_PASSWORD: $AUDIT_MONGO_PASSWORD
+    MONGO_ADMIN_USERNAME: stt_audit_admin
+    MONGO_ADMIN_PASSWORD: $AUDIT_MONGO_PASSWORD
+    MONGO_HOST: audit-stt-mongo
+    AUDIT_NAMESPACE: ci-audit
+  script:
+    - test -n "$AUDIT_MONGO_PASSWORD"
+    # Integration probes contain assertions; never run an optimized interpreter.
+    - test -z "${PYTHONOPTIMIZE:-}"
+    - python -m pip install --require-hashes -r requirements-runtime.lock
+    - PYTHONPATH=. python tests/integration/mongo_probe.py
+    - PYTHONPATH=. python tests/integration/mongo_admission_probe.py
+    - PYTHONPATH=. python tests/integration/mongo_accounting_probe.py
+    - PYTHONPATH=. python tests/integration/mongo_delivery_probe.py
+    - PYTHONPATH=. python tests/integration/mongo_role_probe.py
+  rules:
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true" && $CI_PROJECT_VISIBILITY == "private"'
+    - when: never
+
+image:
   stage: image
+  needs: [unit]
   image:
-    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    name: ghcr.io/osscontainertools/kaniko@sha256:9585e0a789d698ae5755e190fb8f75e04ee793ec542929bf706d862144f44a97
     entrypoint: [""]
   script:
-    - /kaniko/executor
-      --context "${CI_PROJECT_DIR}"
-      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
-      --destination "${CI_REGISTRY_IMAGE}:${CI_COMMIT_TAG}"
+    - /kaniko/executor --context "${CI_PROJECT_DIR}" --dockerfile "${CI_PROJECT_DIR}/Dockerfile" --no-push --tar-path "${CI_PROJECT_DIR}/image.tar" --destination "llmproxy:audit-${CI_COMMIT_SHA}"
+  artifacts:
+    paths: [image.tar]
+    expire_in: 1 day
+
+scan:
+  stage: scan
+  needs: [image]
+  image:
+    name: aquasec/trivy@sha256:6fa071ef8daa2e58b90cbf1710bedca91adbb3bf98693533226f442035b836a6
+    entrypoint: [""]
+  script:
+    - trivy image --input image.tar --exit-code 1 --severity HIGH,CRITICAL --scanners vuln --format json --output trivy.json
+  artifacts:
+    when: always
+    paths: [trivy.json]
+    expire_in: 7 days
+
+publish:
+  stage: publish
+  needs: [image, scan, mongo]
+  image:
+    name: quay.io/skopeo/stable@sha256:dd3929ec029d7122dcfce12b8423425a97f813e51e2d3a9d183a53b634472e2e
+    entrypoint: [""]
+  script:
+    - test "$CI_PROJECT_VISIBILITY" = private
+    - test "$CI_COMMIT_REF_PROTECTED" = true
+    - test -n "$CI_COMMIT_TAG"
+    - export REGISTRY_AUTH_FILE="$(mktemp)"
+    - trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
+    - printf '%s' "$CI_REGISTRY_PASSWORD" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - skopeo copy --authfile "$REGISTRY_AUTH_FILE" docker-archive:image.tar "docker://${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}"
   rules:
-    - if: $CI_COMMIT_TAG
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true" && $CI_PROJECT_VISIBILITY == "private"'
+      when: manual
+    - when: never

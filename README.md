@@ -4,22 +4,45 @@ HTTP proxy that sits between end users and LLM servers and bills them per token.
 
 ## Requirements
 
-* Python >=3.11
-* Python packages from [pyproject.toml](pyproject.toml) (dependencies)
+* Python3.12 (>=3.12,<3.13) z działającym `venv`/`ensurepip`
+  (na Debian/Ubuntu także pakiet `python3.12-venv`); alternatywa: `uv venv --seed --python 3.12 .venv`.
+* Zależności z hash-pinned [requirements-runtime.lock](requirements-runtime.lock).
+  [pyproject.toml](pyproject.toml) określa obsługiwany zakres, lock konkretny build.
 
 ## Quick start
 
-```sh
-python3 -m venv venv
-source venv/bin/activate
+Dla istniejącego checkoutu, bez kont produkcyjnych ani kontaktu z modelem:
 
-python3 -m llmproxy
+```sh
+python3.12 -m venv .venv
+. .venv/bin/activate
+python -m pip install --require-hashes -r requirements-runtime.lock -r requirements-build.lock
+python -m pip install --no-build-isolation --no-deps .
+
+umask 077
+mkdir -p "$HOME/.local/state"
+state="$(mktemp -d "$HOME/.local/state/llmproxy-local.XXXXXXXX")"
+cp examples/local-sqlite.toml "$state/config.toml"
+export LLMPROXY_DB_URI="sqlite://$state/db.sqlite"
+python -m llmproxy.ctl -c "$state/config.toml" user create --secret-file "$state/api-key" \
+  --expires "$(python -c 'import datetime; print((datetime.datetime.now(datetime.UTC)+datetime.timedelta(days=1)).isoformat())')"
+printf 'Private state reference: %s\\n' "$state"
+python -m llmproxy -c "$state/config.toml"
 ```
 
-The SQLite schema is created automatically on first run (and by
-`llmproxyctl`). You can pre-create it with `sqlite3 db.sqlite <
-llmproxy/schema.sql`, but that step is optional; the schema script is
-idempotent.
+Profil nasłuchuje tylko127.0.0.1:8080, bez backendów i bez publicznych metrics.
+Klucz jest w nowym pliku0600, nie w argv, URL ani terminalu. Instrukcja obejmuje
+instalację pakietu i CLI, prywatny config, automatyczny schema upgrade i utworzenie
+klucza. Szczegóły, uwierzytelniony test `/v1/models` bez naliczania opłat,
+restart i granice profilu: [local quickstart](docs/local-quickstart.md).
+
+`python -m llmproxy --create-config -c /private/path/config.toml` tworzy pełny
+szablon0600 i **kończy działanie**, nie uruchamia listenera ani bazy. Domyślny
+szablon wymaga świadomego ustawienia bind/backendów/DB; profil powyżej to osobny
+minimalny przykład. SQLite tworzy i migruje program/CLI: nie odtwarzaj nowego
+journalu samym historycznym `schema.sql`. Docker Compose wymaga osobno prywatnego
+zweryfikowanego image@sha256, prawidłowych uprawnień UID10001 i trwałego volume;
+nie jest zamiennikiem tej instrukcji ani deklaracją production-ready.
 
 ## Configuration
 
@@ -30,6 +53,22 @@ The program will update the list of configured backends, the rate limits
 config file on SIGHUP. SIGHUP also flushes the authentication cache (see
 [Authentication](#authentication)).
 
+### Admission: per-key, nie per-account
+
+`rpm` i `concurrency` są limitami **rekordu API key**, nie człowieka, billing
+account, namespace ani organizacji. Dwa klucze jednego ownera mają osobne buckety.
+Globalny `[rate_limit]` to domyślna polityka per-key przez wszystkie modele,
+nie jeden globalny cap usługi. Modelowy override działa per-key+model;0wyłącza
+konkretny limit. Domyślny tryb local jest per-process; jawny shared koordynuje
+repliki w jednym scope, nadal per-key. `parsing.per_user` zachowuje historyczną
+nazwę, ale również oznacza credential ID. Tylko `parsing.concurrency` jest
+wspólnym parser capem, nie capem wszystkich GPU/backend requests.
+
+Nie ma account grouping ani dziennych token quotas; nieobsługiwane opcje tych
+tabel są odrzucane, nie udają ochrony konta. Nie zmieniono limitów biznesowych
+ani finansowego owner attribution. Szczegóły i migracja starej konfiguracji:
+[admission contract](docs/admission-contract.md).
+
 Each backend must define `type`, which decides the endpoints it is served on:
 
 | `type` | Endpoints |
@@ -37,6 +76,7 @@ Each backend must define `type`, which decides the endpoints it is served on:
 | `chat` | `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, `/v1/responses` |
 | `embedding` | `/v1/embeddings` |
 | `transcription` | `/v1/audio/transcriptions` |
+| `realtime` | `/v1/realtime` (WebSocket) |
 | `conversion` | `/v1/files/convert` |
 | `decision` | `/v1/systemone` (native), `/v1/decisions` (OpenAI Decisions subset) |
 
@@ -225,12 +265,79 @@ is a `400`.
   `MARKER_DATALAB_COMPAT_SYNC=False`, queues the job under a content-hash id
   the proxy refuses.
 
+## Realtime transcription (/v1/realtime)
+
+`GET /v1/realtime` upgrades to a WebSocket and proxies a realtime
+speech-to-text backend (`type = "realtime"`). The backend speaks the OpenAI
+Realtime transcription subset (session.update, input_audio_buffer.*, partial
+and completed transcript events); the proxy forwards frames verbatim in both
+directions and adds the gateway around them:
+
+* **Authentication** — the same API keys as the HTTP endpoints, via the
+  `Authorization: Bearer` header (the standard `require_auth` path; there is
+  no WebSocket-specific credential channel). The client's key is never
+  forwarded to the backend: the backend sees only the configured backend
+  `token`.
+* **Model routing** — `?model=` is optional (OpenAI SDKs send it anyway):
+  absent means the single configured realtime backend and is a `400` with
+  `param: model` when more than one is configured; an unknown model gets
+  `404` `model_not_found`, a model of another type `404`
+  `model_not_supported` — both before any backend connection. The backend
+  config's optional `model` overrides the model id sent to the backend
+  (the real model the deployment expects), like on chat backends.
+* **Rate limits** — the usual `[backends.X.rate_limit]` semantics, scoped to
+  the session: `rpm` bounds handshakes, `concurrency` bounds parallel
+  sessions per API-key+model for model-level policy (global fallback spans
+  models for that credential) and is held for the whole session, including
+  the short drain after the client disconnects. Different keys of the same
+  billing owner are not aggregated; see [admission contract](docs/admission-contract.md).
+* **Errors** — handshake failures are ordinary HTTP errors (401/400/404/429).
+  In session: a backend that rejects the proxy (close 1008, e.g. a wrong
+  `token`) is a configuration fault — the client sees close 1011 and the
+  log gets a CRITICAL naming the backend; the backend's session limit
+  (close 1013) passes through as 1013.
+* **Usage metering and billing** — each
+  `conversation.item.input_audio_transcription.completed` event is billed as
+  its own ONEOFF event (`MODEL/DEVICE/transcription`, the same product shape
+  as offline transcription) before it is forwarded to the client, and its
+  `usage.seconds` is counted in `llmproxy_audio_seconds_total{model}`.
+  Billing per segment, not per session: an hours-long call never loses more
+  than the segment that was in flight when the worker died. Audio the client
+  never committed is never billed.
+* **Timeouts** — the global `timeout_read` does not bound a session (the
+  backend enforces its own session/idle limits). `heartbeat` (default 30 s)
+  is the WebSocket keepalive to the backend. A disconnected client gets a
+  short drain grace (~2 s) so the backend's last reply is still metered,
+  then the backend session is closed.
+* **Provenance** — the 101 carries `X-AI-Generated` (transcripts derive from
+  the input audio — the Art. 50(2) no-substantial-alteration carve-out — so
+  marking is header-only, like on `/v1/audio/transcriptions`).
+
+Example backend:
+
+```toml
+[backends.parakeet-realtime]
+url = "https://parakeet.example.cgc-krk-01.comtegra.cloud"
+token = "APP_TOKEN"        # the backend's endpoint key (bearer)
+device = "a5000"           # billed product: parakeet-realtime/a5000/transcription
+type = "realtime"
+model = "nvidia/parakeet-tdt-0.6b-v3"  # optional: the model id the backend expects
+heartbeat = 30             # optional: WS keepalive ping, seconds
+health_path = "v1/health"  # optional: the STT pod serves health under /v1
+```
+
+**Upgrading:** a `realtime` backend needs a non-empty `token` (authenticates
+the proxy to the backend) and `device` (names the billed product); the proxy
+refuses to start otherwise. Sessions bill one ONEOFF event per completed
+segment — monitor `llmproxy_audio_seconds_total` and the billing stream.
+
 ## Monitoring (Prometheus metrics)
 
 The proxy exposes Prometheus-compatible metrics at `/metrics` by default.
-This endpoint can be scraped by Prometheus to monitor request volume,
-error rates, backend latency, and token usage — enabling alerts when
-traffic spikes or error rates increase.
+Scrape wymaga **osobnego Bearer credential**, nie klucza użytkownika LLM.
+Brak poprawnego sekretu oznacza401, a nie publiczny fallback. Endpoint ujawnia
+operational data i powinien pozostać na prywatnej sieci lub za TLS/RBAC.
+Procedura i ograniczenia: [metrics security](docs/metrics-security.md).
 
 ### Configuration
 
@@ -241,6 +348,7 @@ Metrics are controlled by the `[metrics]` section in
 [metrics]
 enabled = true        # set to false to disable the /metrics endpoint
 path = "/metrics"     # path under which metrics are served
+token_env = "LLMPROXY_METRICS_TOKEN"  # nazwa env, nigdy wartość sekretu
 ```
 
 ### Available metrics
@@ -256,16 +364,18 @@ path = "/metrics"     # path under which metrics are served
 | `llmproxy_tokens_total` | Counter | `model`, `type` | Tokens processed (prompt, completion, embedding) |
 | `llmproxy_audio_seconds_total` | Counter | `model` | Seconds of audio transcribed |
 | `llmproxy_file_conversions_total` | Counter | `model` | PDF pages converted to Markdown |
-| `llmproxy_user_requests_total` | Counter | `user`, `model` | Admitted requests per user (api-key comment, else key id) and model |
-| `llmproxy_user_active_requests` | Gauge | `user`, `model` | In-flight requests per user and model — non-zero series are who is connected right now |
+| `llmproxy_user_requests_total` | Counter | `user`, `model` | Admitted requests per API-key pseudonym and model; no raw id/comment |
+| `llmproxy_user_active_requests` | Gauge | `user`, `model` | In-flight requests per API-key pseudonym and model; pseudonymous, not anonymous data |
 
 ### Quick start (Kubernetes + Prometheus Operator)
 
 If you run Prometheus Operator (kube-prometheus-stack), the full path
 from deploy to Grafana is:
 
-1. **Deploy** the new llmproxy version — the `/metrics` endpoint is
-   active on port 8080 by default.
+1. **Provision a dedicated scrape secret**, zgodnie z
+   [runbookiem](docs/metrics-security.md), i przekaż go przez env reference
+   proxy oraz Secret/file reference Prometheusa. Następnie deploy wersji z auth
+   metrics. Bez sekretu `/metrics` na porcie8080 odpowiada401.
 
 2. **Create a ServiceMonitor** so Prometheus Operator automatically
    starts scraping:
@@ -299,9 +409,10 @@ from deploy to Grafana is:
    - Choose your Prometheus datasource
    - The dashboard has 13 panels: request rate, error rate, status codes,
      active requests, latency percentiles, backend latency/errors, token
-     usage, plus per-user visibility — connected right now (user × model,
-     in-flight), request rate by user, and user × model activity over the
-     last 15 minutes
+     usage, plus per-credential visibility — connected right now (key × model,
+     in-flight), request rate by key, and key × model activity over the last
+     15minutes. The legacy Prometheus label `user` is a pseudonymous credential
+     label, not a person/account count; multiple keys of one person stay distinct.
 
 ### Prometheus scrape config (standalone, non-Operator)
 
@@ -312,6 +423,9 @@ If you run Prometheus without the Operator, add a scrape job to your
 scrape_configs:
   - job_name: "llmproxy"
     metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/llmproxy_metrics_token
     static_configs:
       - targets: ["llm-billing-proxy:8080"]
 ```
@@ -389,22 +503,22 @@ sqlite3 db.sqlite < llmproxy/schema.sql
 2. Copy [llmproxy/config.toml](llmproxy/config.toml) to your repository. A good
 relative path would be `secrets/llm-billing-proxy-config.toml`.
 3. Add appropriate entries to your compose file's `services` and `secrets`
-sections. There's a template [compose.yml](compose.yml) in this repository.
+sections. There's a template [compose.yaml](compose.yaml) in this repository.
 4. Bring the new service up and verify it started correctly
 (e.g `docker compose up llm-billing-proxy`).
 
 ### MongoDB
 
-1. Create a MongoDB user with the following privileges (see section
-[Database](#database) below for JS snippets):
-  * `{resource: {db: "cgc", collection: "api_keys"}, actions: ["find"]}`
-  * `{resource: {db: "billing", collection: "events_oneoff"}, actions: ["insert"]}`
+1. Provisionuj osobny runtime user według
+   [wersjonowanego kontraktu](docs/mongo-runtime-role.md), z profilami odpowiadającymi
+   konfiguracji. Auth wymaga `cgc.api_keys` **i** `cgc.rest_users`; financial authority
+   to `cgc.billing_record`, nie historyczne `billing.events_oneoff`.
 2. Copy [llmproxy/config.toml](llmproxy/config.toml) to your repository. A good
 relative path would be `secrets/llm-billing-proxy-config.toml`.
-3. In the config edit `uri` in section `db` so that it includes credentials for
-the Mongo user (e.g. `mongodb://myuser:mypass@host:27017/?authSource=cgc`).
-4. Add appropriate entries to your compose file's `services` and `secrets`
-sections. There's a template [compose.yml](compose.yml) in this repository.
+3. Dostarcz Mongo URI przez chroniony `LLMPROXY_DB_URI`/secret reference, ze
+   zgodnym authSource. Nie umieszczaj hasła w argv, przykładzie ani repo.
+4. Dodaj service/env i config Secret reference; wzór: [compose.yaml](compose.yaml).
+   Nie używaj runtime user do backup/restore lub fixture provisioning.
 5. Bring the new service up and verify it started correctly
 (e.g `docker compose up llm-billing-proxy`).
 
@@ -426,41 +540,16 @@ curl -v -H'Content-Type: application/json' -H'Authorization: Bearer token2' \
 If using SQLite see [llmproxy/schema.sql](llmproxy/schema.sql).
 Otherwise read on.
 
-This program uses MongoDB for authentication and completion logging.
-The schema is compatible with Comtergra GPU Core.
-The MongoDB user needs the following privileges:
+Mongo służy do auth, financial accounting i nowych durable journals/leases.
+Runtime schema i BSON IDs są zgodne z CGC consumer, ale role muszą obejmować
+**rzeczywiście używane** kolekcje/profiles. Nie kopiuj dawnych ról dla
+`billing.events_oneoff` ani zamienionych między databases role references.
 
-```js
-db.getSiblingDB("cgc").createRole({
-  role: "apiKeysReader",
-  privileges: [
-    {
-      resource: {db: "cgc", collection: "api_keys"},
-      actions: ["find"],
-    },
-  ],
-  roles: [],
-});
-db.getSiblingDB("billing").createRole({
-  role: "completionBillingWriter",
-  privileges: [
-    {
-      resource: {db: "billing", collection: "events_oneoff"},
-      actions: ["insert"],
-    },
-  ],
-  roles: [],
-});
-
-db.getSiblingDB("cgc").createUser({
-  user: "llm-billing-proxy",
-  pwd: "mypass",
-  roles: [
-    { role: "completionBillingWriter", db: "cgc" },
-    { role: "apiKeysReader", db: "billing" },
-  ],
-});
-```
+[Mongo runtime role](docs/mongo-runtime-role.md) zawiera tabelę minimalnych actions,
+metadata generator `python -m llmproxy.mongo_roles`, create-only admin provisioning
+z `passwordPrompt()` oraz warunki odbioru. Runtime nie ma prawa update/delete
+financial history, write auth collections, drop lub zarządzania użytkownikami.
+Sama rola nie jest dowodem backup/DR, pricing consumer ani konkretnej instalacji.
 
 ## Authentication
 
@@ -513,19 +602,18 @@ counters show whether the cache is doing anything.
 If using SQLite see [llmproxy/schema.sql](llmproxy/schema.sql).
 Otherwise read on.
 
-When a user performs a completion, two events (prompt token and completion
-token counts) are inserted into the collection `billing.events_oneoff`.
+When a user performs a completion, two entries (prompt token and completion
+token counts) are inserted into the Mongo collection `cgc.billing_record`.
 These documents have the following fields:
 
-* `date_created` -- date and time when the request finished processing
-* `user_id` -- `user_id` of the API key
+* `created_at` -- date and time when the request finished processing
+* `user_id` -- owner id of the API key (`rest_users._id`)
 * `api_key_id` -- id of the API key
-* `product` -- a string in the following format: `MODEL/DEVICE/TYPE`, where
-    * `MODEL` is the name of the backend
-    * `DEVICE` is the name of the GPU where the model runs
-    * `TYPE` is `prompt`, `completion`, `embedding`, `transcription`, or
-      `conversion` (PDF pages for `/v1/files/convert`)
-* `quantity` -- token count
+* `org_id` / `tier` / `namespace` -- owner metadata for billing
+* `resources` -- map of `product` to quantity, where `product` is
+  `model/device/type` lowercased: `type` is `prompt`, `completion`,
+  `embedding`, `transcription`, or `conversion` (PDF pages for
+  `/v1/files/convert`)
 * `request_id` -- request ID to correlate prompt/completion counts
 
 ## EU AI Act provenance marking (Art. 50(2))

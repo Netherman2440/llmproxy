@@ -1,11 +1,8 @@
 import asyncio
 import gc
 import hashlib
-import importlib
-import importlib.resources
 import json
 import os
-import sqlite3
 import sys
 import tempfile
 import time
@@ -16,16 +13,26 @@ from unittest import mock
 
 import aiohttp
 import aiohttp.test_utils
-import prometheus_client
 
 from llmproxy import auth, config, ratelimit
 from llmproxy.app import create_app, reload_config
 from llmproxy.db import get_db
 
 from . import mockbackend
+from .metrics_fixtures import ALICE_LABEL, AUTH_HEADERS as METRICS_AUTH, MYUSER_LABEL, TOKEN as METRICS_TOKEN
+
+
+class ProductionTestServer(aiohttp.test_utils.TestServer):
+    async def _make_runner(self, **kwargs):
+        # Match app.main: disconnect must not cancel accounting after delivery.
+        kwargs['handler_cancellation'] = False
+        return aiohttp.web.AppRunner(self.app, **kwargs)
 
 
 class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
+    async def get_server(self, app):
+        return ProductionTestServer(app)
+
     async def asyncSetUp(self):
         # Don't care about type checkers
         warnings.simplefilter("ignore", category=aiohttp.web.NotAppKeyWarning)
@@ -41,9 +48,14 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
         await super().asyncSetUp()
 
     async def asyncTearDown(self):
+        # Close the client (and with it the server) BEFORE unlinking the
+        # database file: the server's graceful shutdown waits out in-flight
+        # handlers (handler_cancellation=False -- a billing-critical pin),
+        # and a handler that still holds its request-scoped db connection
+        # would otherwise keep the file locked while the test unlinks it.
+        await super().asyncTearDown()
         os.close(self.db_fd)
         os.unlink(self.db_path)
-        await super().asyncTearDown()
 
     async def get_application(self):
         self.db_fd, self.db_path = tempfile.mkstemp()
@@ -940,9 +952,9 @@ class TestMalformedBody(LLMProxyAppTestCase):
                     self.assertEqual(msg, expected)
 
     async def test_failed_multipart_releases_spooled_files(self):
-        # The file part is spooled to a temp file before a later part fails
-        # the parse. That file must be released (and so closed) right away,
-        # not stay open with its disk space until the cyclic GC runs, so GC
+        # The file part gets a temporary spool before a later part fails
+        # the parse. Its memory/file resource must be released right away,
+        # not stay alive until the cyclic GC runs, so GC
         # is off here and only refcounting can free it. Covers a plain error,
         # one with a chained exception, an assert, and a 413 that is passed
         # on rather than turned into a 400.
@@ -961,20 +973,32 @@ class TestMalformedBody(LLMProxyAppTestCase):
             ("field over client_max_size", 413, model_part + b"\r\n"
                 + b"m" * 60000 + b"\r\n--xyz--\r\n"),
         ]
-        temporary_file = tempfile.TemporaryFile
+        # Supported aiohttp uses a small in-memory spool, then rolls to disk.
+        # Track the actual allocation boundary, not only its disk fallback.
+        temporary_file = tempfile.SpooledTemporaryFile
         gc.disable()
         self.addCleanup(gc.enable)
 
         for name, status, rest in cases:
             with self.subTest(case=name):
                 spooled = []
+                spool_created = asyncio.Event()
+
+                async def body_chunks():
+                    # Force a resource to exist before the later failure.
+                    # Current aiohttp can reject a fully buffered oversized
+                    # body before allocating any spool at all.
+                    yield file_part
+                    await asyncio.wait_for(spool_created.wait(), 1)
+                    yield rest
 
                 def tracked_temporary_file(*args, **kwargs):
                     f = temporary_file(*args, **kwargs)
                     spooled.append(weakref.ref(f))
+                    spool_created.set()
                     return f
 
-                with mock.patch("tempfile.TemporaryFile",
+                with mock.patch("llmproxy.body.SpooledTemporaryFile",
                             tracked_temporary_file), \
                         mock.patch.object(self.app, "_client_max_size",
                             50000), \
@@ -982,7 +1006,7 @@ class TestMalformedBody(LLMProxyAppTestCase):
                     # Closed by its finalizer, which warns about it.
                     warnings.simplefilter("ignore", ResourceWarning)
                     req = self._raw("/v1/audio/transcriptions",
-                        file_part + rest, "multipart/form-data; boundary=xyz")
+                        body_chunks(), "multipart/form-data; boundary=xyz")
                     async with req as res:
                         self.assertEqual(res.status, status)
 
@@ -1000,7 +1024,7 @@ class TestMalformedBody(LLMProxyAppTestCase):
                 "multipart/form-data; boundary=xyz")
             await self._assert_400(req, "/v1/audio/transcriptions")
 
-        [line] = [l for l in logs.output if "Malformed request body" in l]
+        [line] = [entry for entry in logs.output if "Malformed request body" in entry]
         self.assertLess(len(line), 500)
         self.assertRegex(line, r" at multipart\.py:\d+ _read_boundary$")
 
@@ -1017,9 +1041,9 @@ class TestMalformedBody(LLMProxyAppTestCase):
         ]
         for method, path, body, content_type in cases:
             with self.subTest(path=path):
-                with mock.patch.object(aiohttp.web.BaseRequest, method,
-                            fail), \
-                        self.assertLogs("aiohttp.server", level="ERROR"):
+                patcher = (mock.patch("llmproxy.body.read_multipart", fail) if method == "post"
+                    else mock.patch.object(aiohttp.web.BaseRequest, method, fail))
+                with patcher, self.assertLogs("aiohttp.server", level="ERROR"):
                     async with self._raw(path, body, content_type) as res:
                         self.assertEqual(res.status, 500)
 
@@ -1038,10 +1062,11 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
     def test_validate_accepts_every_backend_type(self):
         for backend_type in config.BACKEND_TYPES:
             with self.subTest(type=backend_type):
-                meta = {"type": backend_type}
+                meta = {"type": backend_type, "url": "https://example.org",
+                    "device": "a5000", "token": "synthetic-only"}
                 if backend_type == "decision":
                     meta.update(url="https://example.org", model="basal", device="a5000")
-                if backend_type == "conversion":
+                if backend_type in ("conversion", "realtime"):
                     meta.update(token="APP_TOKEN", device="a5000")
                 config.validate({"backends": {"m": meta}})
 
@@ -1068,6 +1093,7 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
 
     def test_validate_accepts_positive_integer_max_model_len(self):
         config.validate({"backends": {"mymodel": {"type": "chat",
+            "url": "http://inference:8000", "device": "cpu", "token": "",
             "max_model_len": 131072}}})
 
     def test_validate_rejects_invalid_max_model_len(self):
@@ -1096,8 +1122,10 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
     def test_validate_accepts_valid_timeout_and_client_max_size(self):
         config.validate({
             "client_max_size": 2147483648,
-            "backends": {"m": {"type": "chat", "timeout": 1800},
-                "n": {"type": "chat", "timeout": 0.5}},
+            "backends": {"m": {"type": "chat", "timeout": 1800,
+                "url": "http://inference:8000", "device": "cpu", "token": ""},
+                "n": {"type": "chat", "timeout": 0.5,
+                    "url": "http://inference:8000", "device": "cpu", "token": ""}},
         })
 
     def test_validate_rejects_invalid_provenance(self):
@@ -1194,6 +1222,17 @@ def _parse_metrics(text):
 
 
 class TestMetrics(LLMProxyAppTestCase):
+    async def asyncSetUp(self):
+        patcher = mock.patch.dict(os.environ, {'LLMPROXY_METRICS_TOKEN': METRICS_TOKEN})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        await super().asyncSetUp()
+
+    async def get_client(self, server):
+        # Existing metrics/counter tests scrape as the dedicated principal.
+        # Explicit LLM request headers still override this client default.
+        return aiohttp.test_utils.TestClient(server, headers=METRICS_AUTH)
+
     async def test_metrics_endpoint_exists(self):
         """The /metrics endpoint returns 200 and Prometheus content type."""
         async with self.client.request("GET", "/metrics") as res:
@@ -1317,8 +1356,8 @@ class TestMetrics(LLMProxyAppTestCase):
         self.assertIn("llmproxy_active_requests", text)
 
 
-    async def test_user_metrics_label_is_key_comment(self):
-        """Per-user metrics are labelled by the api-key comment."""
+    async def test_user_metrics_label_never_exposes_key_comment(self):
+        """Per-key metrics use a stable pseudonym instead of a human comment."""
         await self.insert_key("alicetoken", "aliceid", comment="Alice")
         body = {"model": "mymodel",
             "messages": [{"role": "user", "content": "hi"}]}
@@ -1332,12 +1371,12 @@ class TestMetrics(LLMProxyAppTestCase):
         # Unique user+model combination for this test, so the exact value
         # is assertable despite the process-global counter.
         lines = [line for line in parsed["llmproxy_user_requests_total"]
-            if 'user="Alice"' in line and 'model="mymodel"' in line]
+            if 'user="' + ALICE_LABEL + '"' in line and 'model="mymodel"' in line]
         self.assertEqual(len(lines), 1)
         self.assertEqual(float(lines[0].rsplit(" ", 1)[1]), 1.0)
 
-    async def test_user_metrics_label_falls_back_to_key_id(self):
-        """A key without a comment is labelled by its unique id."""
+    async def test_user_metrics_without_comment_still_hide_raw_key_id(self):
+        """Keys without comments also get a pseudonym, never their raw id."""
         body = {"model": "mymodel",
             "messages": [{"role": "user", "content": "hi"}]}
         async with self.client.request("POST", "/v1/chat/completions",
@@ -1347,7 +1386,7 @@ class TestMetrics(LLMProxyAppTestCase):
         async with self.client.request("GET", "/metrics") as res:
             parsed = _parse_metrics(await res.text())
 
-        found = any('user="myuser"' in line and 'model="mymodel"' in line
+        found = any('user="' + MYUSER_LABEL + '"' in line and 'model="mymodel"' in line
             for line in parsed["llmproxy_user_requests_total"])
         self.assertTrue(found,
             "llmproxy_user_requests_total missing myuser/mymodel")
@@ -1370,7 +1409,7 @@ class TestMetrics(LLMProxyAppTestCase):
         async with self.client.request("GET", "/metrics") as res:
             parsed = _parse_metrics(await res.text())
         mid = [line for line in parsed["llmproxy_user_active_requests"]
-            if 'user="myuser"' in line and 'model="slowok"' in line]
+            if 'user="' + MYUSER_LABEL + '"' in line and 'model="slowok"' in line]
         self.assertEqual(len(mid), 1)
         self.assertEqual(float(mid[0].rsplit(" ", 1)[1]), 1.0)
 
@@ -1378,7 +1417,7 @@ class TestMetrics(LLMProxyAppTestCase):
         async with self.client.request("GET", "/metrics") as res:
             parsed = _parse_metrics(await res.text())
         after = [line for line in parsed["llmproxy_user_active_requests"]
-            if 'user="myuser"' in line and 'model="slowok"' in line]
+            if 'user="' + MYUSER_LABEL + '"' in line and 'model="slowok"' in line]
         self.assertEqual(len(after), 1)
         self.assertEqual(float(after[0].rsplit(" ", 1)[1]), 0.0)
 
@@ -1393,7 +1432,7 @@ class TestMetrics(LLMProxyAppTestCase):
                 parsed = _parse_metrics(await res.text())
             line = next((line for line
                     in parsed["llmproxy_user_requests_total"]
-                    if 'user="myuser"' in line and 'model="mymodel"' in line),
+                    if 'user="' + MYUSER_LABEL + '"' in line and 'model="mymodel"' in line),
                 None)
             return float(line.rsplit(" ", 1)[1]) if line else 0.0
 
